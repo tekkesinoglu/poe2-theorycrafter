@@ -1,0 +1,22 @@
+# Bağımlılıklar (npm install ile geri gelir)
+node_modules/
+dist/
+dist-ssr/
+
+# Rust & Tauri derleme çıktıları (4+ GB yer kaplayan klasör)
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# İndirilen büyük önbellek / yama verileri (isteğe bağlı, Patch Güncelle ile iner)
+*.pdb
+*.exe
+*.msi
+*.dmg
+*.AppImage
+
+# Editör ve sistem dosyaları
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

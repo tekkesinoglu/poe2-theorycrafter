@@ -1,0 +1,25 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PoE2 Theorycrafter",
+  "version": "0.1.0",
+  "identifier": "com.seyit.poe2theorycrafter",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "bundle": {
+    "active": false,
+    "icon": []
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "PoE 2 Theorycrafter",
+        "width": 1280,
+        "height": 800
+      }
+    ]
+  }
+}
