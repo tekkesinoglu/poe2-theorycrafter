@@ -12,6 +12,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// `game_data.bin` içeriğinin biçimi değiştiğinde artırılır (2: ikon atlasları).
+const DATA_FORMAT_VERSION: u32 = 2;
+
 pub struct DataUpdater {
     data_dir: PathBuf,
     client: Client,
@@ -35,7 +38,10 @@ impl DataUpdater {
     pub async fn sync_game_data(&self, force: bool) -> Result<GameDatabase> {
         fs::create_dir_all(&self.data_dir)?;
         let bin_path = self.data_dir.join("game_data.bin");
-        let (branch, latest_hash) = self.fetch_repo_info().await?;
+        let (branch, upstream_sha) = self.fetch_repo_info().await?;
+        // Önbellek anahtarı = upstream commit + bizim veri biçimi sürümü. Biçim değişince
+        // (ör. ikon atlasları eklendi) eski önbellek, commit aynı olsa bile geçersiz sayılır.
+        let latest_hash = format!("{}#fmt{}", upstream_sha, DATA_FORMAT_VERSION);
 
         if !force && bin_path.exists() {
             match fs::read(&bin_path) {
