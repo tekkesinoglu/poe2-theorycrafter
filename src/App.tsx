@@ -2074,7 +2074,10 @@ export default function App() {
             allocatedIds={allocatedIds}
             highlightedIds={matchedNodeIds}
             focusTrigger={focusTrigger}
+            selectedClass={selectedBaseClassName}
+            selectedAscendancy={activeAscendancy?.name || ''}
             onToggleNode={handleToggleNode}
+            onSetAllocatedIds={setAllocatedIds}
           />
         </div>
 
