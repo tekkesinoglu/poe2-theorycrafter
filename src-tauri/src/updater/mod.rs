@@ -20,6 +20,8 @@ impl DataUpdater {
     pub fn new(app_data_dir: PathBuf) -> Self {
         let client = Client::builder()
             .user_agent("PoE2-Theorycrafter/0.1")
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -178,7 +180,12 @@ impl DataUpdater {
             })
             .unwrap_or_default();
 
-        folders.sort();
+        // Sayısal sıralama: "0_10" > "0_9" (alfabetik sıralama bunu yanlış yapardı)
+        folders.sort_by_key(|name| {
+            name.split('_')
+                .map(|p| p.parse::<u32>().unwrap_or(0))
+                .collect::<Vec<u32>>()
+        });
         Ok(folders.pop().unwrap_or_else(|| "0_1".to_string()))
     }
 
@@ -473,9 +480,27 @@ impl DataUpdater {
         let mut str_req_weight: f32 = 0.0;
         let mut dex_req_weight: f32 = 0.0;
         let mut int_req_weight: f32 = 0.0;
+        let mut in_tags = false;
 
         for raw_line in lua_code.lines() {
             let line = raw_line.trim();
+
+            // Çok satırlı `tags = { ... }` bloğunun içindeki satırlar
+            if in_tags {
+                if line.starts_with('}') {
+                    in_tags = false;
+                } else if let Some((k, v)) = line.trim_end_matches(',').split_once('=') {
+                    let tag_name = k.trim().trim_matches('"');
+                    if v.trim() == "true" && !tag_name.is_empty() {
+                        // Gerçek veride destek gemleri `support = true` etiketiyle işaretli
+                        if tag_name == "support" {
+                            is_support = true;
+                        }
+                        tags.push(tag_name.to_string());
+                    }
+                }
+                continue;
+            }
 
             if line.starts_with("[\"") && line.contains("\"] = {") {
                 if let Some(id) = current_id.take() {
@@ -504,6 +529,7 @@ impl DataUpdater {
                     str_req_weight = 0.0;
                     dex_req_weight = 0.0;
                     int_req_weight = 0.0;
+                    in_tags = false;
                 }
             } else if current_id.is_some() {
                 if let Some(rest) = line.strip_prefix("name = \"") {
@@ -520,6 +546,9 @@ impl DataUpdater {
                     dex_req_weight = rest.trim_end_matches(',').parse::<f32>().unwrap_or(0.0);
                 } else if let Some(rest) = line.strip_prefix("reqInt = ") {
                     int_req_weight = rest.trim_end_matches(',').parse::<f32>().unwrap_or(0.0);
+                } else if line.starts_with("tags = {") && !line.contains('}') {
+                    // Gerçek Gems.lua çok satırlı yazıyor: sonraki satırlar okunacak
+                    in_tags = true;
                 } else if line.starts_with("tags = {") {
                     let inner = line
                         .trim_start_matches("tags = {")
@@ -561,7 +590,10 @@ impl DataUpdater {
 }
 
 fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
-    let tmp_path = target.with_extension("tmp");
+    // Eş zamanlı yazımlar aynı .tmp dosyasını ezmesin diye benzersiz geçici ad
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = target.with_extension(format!("tmp.{}.{}", std::process::id(), n));
     let mut file = fs::File::create(&tmp_path)?;
     file.write_all(data)?;
     file.sync_all()?;
