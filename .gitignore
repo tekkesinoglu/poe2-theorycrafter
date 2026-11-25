@@ -1,3 +1,4 @@
+@"
 # Bağımlılıklar (npm install ile geri gelir)
 node_modules/
 dist/
@@ -7,7 +8,8 @@ dist-ssr/
 src-tauri/target/
 src-tauri/gen/schemas/
 
-# İndirilen büyük önbellek / yama verileri (isteğe bağlı, Patch Güncelle ile iner)
+# İndirilen büyük önbellek / yama verileri
+game_data.bin
 *.pdb
 *.exe
 *.msi
@@ -20,3 +22,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+"@ | Out-File -FilePath .gitignore -Encoding utf8
+
+git init
+git add .
+git commit -m "feat: initial working PoE2 Theorycrafter build"

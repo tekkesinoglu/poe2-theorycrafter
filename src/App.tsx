@@ -1,7 +1,19 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { PassiveNode, SkillTreeCanvas } from './components/SkillTreeCanvas';
+import {
+  ASCENDANCIES,
+  AVAILABLE_STATS,
+  CORE_SPIRIT_BUFFS,
+  LIMITS,
+  STORAGE_KEY,
+  SpiritBuffDef,
+  StatWeightItem,
+  clampInt,
+  normalizeToHundred,
+  rebalanceWeights,
+} from './data/gameConstants';
 
 interface ClassStart {
   name: string;
@@ -25,43 +37,32 @@ interface SupportRecommendation {
   reason: string;
 }
 
-interface StatWeightItem {
-  stat: string;
-  weight: number;
-}
-
-interface SpiritBuffDef {
-  id: string;
-  name: string;
-  cost: number;
-  category: 'Herald' | 'Meta' | 'Aura / Buff';
-  effectLabel: string;
-  moreDpsPct?: number;
-  requiredTag?: string;
-  incCritChance?: number;
-  incEvasionPct?: number;
-  incEsPct?: number;
-}
-
-interface AscendancyNodeDef {
-  id: string;
-  name: string;
-  desc: string;
-  moreDpsPct?: number;
-  incCritChance?: number;
-  critDamageBonus?: number;
-  incLifePct?: number;
-  incEsPct?: number;
-  incArmourPct?: number;
-  incEvasionPct?: number;
-  bonusSpirit?: number;
-}
-
-interface AscendancyDef {
-  id: string;
-  name: string;
-  baseClass: string;
-  nodes: AscendancyNodeDef[];
+interface BuildEvaluationResult {
+  parsed: {
+    totals: Record<string, number>;
+    extra_damage_pct: Record<string, number>;
+    more_multipliers: number[];
+    raw_lines: string[];
+  };
+  points: number;
+  effective_hp: number;
+  total_life: number;
+  total_es: number;
+  total_armour: number;
+  total_evasion: number;
+  effective_crit: number;
+  total_crit_mult_pct: number;
+  est_dps: number;
+  max_spirit: number;
+  used_spirit: number;
+  remaining_spirit: number;
+  tree_and_asc_spirit: number;
+  support_more_pct: number;
+  support_count: number;
+  spirit_more_pct: number;
+  asc_more_pct: number;
+  effective_level: number;
+  bonus_level_gain_pct: number;
 }
 
 interface SavedBuild {
@@ -83,494 +84,94 @@ interface SavedBuild {
   ascendancyNodeIds?: string[];
 }
 
-const STORAGE_KEY = 'poe2_theorycrafter_saved_builds_v1';
+const EMPTY_EVAL: BuildEvaluationResult = {
+  parsed: { totals: {}, extra_damage_pct: {}, more_multipliers: [], raw_lines: [] },
+  points: 0,
+  effective_hp: 0,
+  total_life: 1150,
+  total_es: 450,
+  total_armour: 1800,
+  total_evasion: 1800,
+  effective_crit: 8.0,
+  total_crit_mult_pct: 100,
+  est_dps: 0,
+  max_spirit: 100,
+  used_spirit: 0,
+  remaining_spirit: 100,
+  tree_and_asc_spirit: 0,
+  support_more_pct: 0,
+  support_count: 0,
+  spirit_more_pct: 0,
+  asc_more_pct: 0,
+  effective_level: 20,
+  bonus_level_gain_pct: 0,
+};
 
-const LIMITS = {
-  maxPoints: { min: 1, max: 128 },
-  weaponBaseDps: { min: 1, max: 25000 },
-  baseGemLevel: { min: 1, max: 21 },
-  bonusSkillLevels: { min: 0, max: 15 },
-  gearSpirit: { min: 0, max: 500 },
-  maxAscendancyNodes: 4,
-} as const;
-
-function clampInt(value: number, min: number, max: number): number {
-  if (!Number.isFinite(value) || Number.isNaN(value)) return min;
-  return Math.max(min, Math.min(max, Math.round(value)));
+interface NumberFieldProps {
+  value: number;
+  min: number;
+  max: number;
+  onChange: (val: number) => void;
+  title?: string;
+  style?: React.CSSProperties;
 }
 
-const ASCENDANCIES: AscendancyDef[] = [
-  // MERCENARY
-  {
-    id: 'witchhunter',
-    name: 'Witchhunter',
-    baseClass: 'Mercenary',
-    nodes: [
-      { id: 'wh_pitiless', name: 'Pitiless Killer (Culling Strike)', desc: '+18% More DPS & Culling Strike', moreDpsPct: 18 },
-      { id: 'wh_judge', name: 'Judge, Jury and Executioner', desc: '+22% More Hasar (Decimating Strike)', moreDpsPct: 22 },
-      { id: 'wh_zealous', name: 'Zealous Inquisition', desc: '+15% More Alan/Patlama DPS', moreDpsPct: 15 },
-      { id: 'wh_sorcery', name: 'Sorcery Ward', desc: '+35% Armour & Evasion (Elemental Kalkan)', incArmourPct: 35, incEvasionPct: 35 },
-      { id: 'wh_obsessive', name: 'Obsessive Rituals', desc: '+25% Energy Shield & +20 Spirit', incEsPct: 25, bonusSpirit: 20 },
-      { id: 'wh_weapon_master', name: 'Weapon Master', desc: '+25% Crit Şansı & +30% Crit Hasarı', incCritChance: 25, critDamageBonus: 30 },
-    ],
-  },
-  {
-    id: 'gemling',
-    name: 'Gemling Legionnaire',
-    baseClass: 'Mercenary',
-    nodes: [
-      { id: 'gl_cryst', name: 'Crystalline Potential', desc: '+16% More Gem Kalite Çarpanı', moreDpsPct: 16 },
-      { id: 'gl_implanted', name: 'Implanted Gems (+1 All Skills)', desc: '+15% More Yetenek Hasarı', moreDpsPct: 15 },
-      { id: 'gl_thaum', name: 'Thaumaturgical Infusion', desc: '+20% Maximum Life & +20% ES', incLifePct: 20, incEsPct: 20 },
-      { id: 'gl_adaptive', name: 'Adaptive Capability', desc: '+30% Armour & +30% Evasion', incArmourPct: 30, incEvasionPct: 30 },
-      { id: 'gl_enhanced', name: 'Enhanced Effectiveness', desc: '+35% Crit Şansı', incCritChance: 35 },
-      { id: 'gl_integrated', name: 'Integrated Efficiency', desc: '+14% More DPS & +25 Spirit', moreDpsPct: 14, bonusSpirit: 25 },
-    ],
-  },
-  // MONK
-  {
-    id: 'invoker',
-    name: 'Invoker',
-    baseClass: 'Monk',
-    nodes: [
-      { id: 'inv_grace', name: 'Lead me through Grace...', desc: 'Evasion/ES üzerinden +60 Bonus Spirit', bonusSpirit: 60 },
-      { id: 'inv_expression', name: '...and Protect me from Harm', desc: '+45% Armour & +35% Evasion', incArmourPct: 45, incEvasionPct: 35 },
-      { id: 'inv_unbound', name: 'Unbound Avatar', desc: '+28% More Elemental DPS', moreDpsPct: 28 },
-      { id: 'inv_sunder', name: 'Sunder my Enemies...', desc: 'Crit ile Direnç Yoksayma (+30% Crit Şansı)', incCritChance: 30 },
-      { id: 'inv_scatter', name: '...and Scatter Them to the Winds', desc: '+18% More Elemental Tetikleme DPS', moreDpsPct: 18 },
-      { id: 'inv_faith', name: 'Faith is a Choice', desc: '+35% Maximum Energy Shield', incEsPct: 35 },
-    ],
-  },
-  {
-    id: 'acolyte_chayula',
-    name: 'Acolyte of Chayula',
-    baseClass: 'Monk',
-    nodes: [
-      { id: 'ac_reality', name: 'Reality Rending', desc: '+25% More Extra Chaos Hasarı', moreDpsPct: 25 },
-      { id: 'ac_embrace', name: 'Embrace the Darkness', desc: '+40% Maximum Energy Shield & +20% Life', incEsPct: 40, incLifePct: 20 },
-      { id: 'ac_grasp', name: 'Grasp of the Void', desc: '+20% More Chaos DPS', moreDpsPct: 20 },
-      { id: 'ac_cons', name: 'Consuming Questions', desc: '+30% Energy Shield & +30% Evasion', incEsPct: 30, incEvasionPct: 30 },
-      { id: 'ac_waking', name: 'Waking Dream', desc: '+40% Crit Hasarı & +20% Crit Şansı', critDamageBonus: 40, incCritChance: 20 },
-      { id: 'ac_lucidity', name: 'Lucidity', desc: '+30 Spirit & +25% Evasion', bonusSpirit: 30, incEvasionPct: 25 },
-    ],
-  },
-  // SORCERESS
-  {
-    id: 'stormweaver',
-    name: 'Stormweaver',
-    baseClass: 'Sorceress',
-    nodes: [
-      { id: 'sw_scouring', name: 'Scouring Winds', desc: '+20% More Elemental Exposure DPS', moreDpsPct: 20 },
-      { id: 'sw_tempest', name: 'Tempest Caller', desc: '+24% More Elemental Storm DPS', moreDpsPct: 24 },
-      { id: 'sw_strike_twice', name: 'Strike Twice (Double Shock)', desc: '+22% More Shock Hasar Çarpanı', moreDpsPct: 22 },
-      { id: 'sw_force_will', name: 'Force of Will', desc: '+40% Maximum Energy Shield', incEsPct: 40 },
-      { id: 'sw_constant_gale', name: 'Constant Gale', desc: '+15% More Cast/Arcane Surge DPS', moreDpsPct: 15 },
-      { id: 'sw_heart_storm', name: 'Heart of the Storm', desc: '+30% Energy Shield & +25 Spirit', incEsPct: 30, bonusSpirit: 25 },
-    ],
-  },
-  {
-    id: 'chronomancer',
-    name: 'Chronomancer',
-    baseClass: 'Sorceress',
-    nodes: [
-      { id: 'ch_time_snap', name: 'Time Snap', desc: '+22% More Cooldown Reset DPS', moreDpsPct: 22 },
-      { id: 'ch_unleash', name: 'Unleash', desc: '+25% More Tekrarlanan Büyü DPS', moreDpsPct: 25 },
-      { id: 'ch_apex', name: 'Apex of the Moment', desc: '+35% Evasion & Yavaşlatma Savunması', incEvasionPct: 35 },
-      { id: 'ch_quicksand', name: 'Quicksand Hourglass', desc: '+35% Crit Şansı & +35% Crit Hasarı', incCritChance: 35, critDamageBonus: 35 },
-      { id: 'ch_ultimate', name: 'Ultimate Command', desc: '+30% Energy Shield & +15% Life', incEsPct: 30, incLifePct: 15 },
-      { id: 'ch_footprints', name: 'Footprints in the Sand', desc: '+30 Spirit & +20% ES', bonusSpirit: 30, incEsPct: 20 },
-    ],
-  },
-  // RANGER
-  {
-    id: 'deadeye',
-    name: 'Deadeye',
-    baseClass: 'Ranger',
-    nodes: [
-      { id: 'de_gathering', name: 'Gathering Winds (Tailwind)', desc: '+20% More Hız & +35% Evasion', moreDpsPct: 20, incEvasionPct: 35 },
-      { id: 'de_endless', name: 'Endless Munitions (+1 Projectile)', desc: '+25% More Projectile DPS', moreDpsPct: 25 },
-      { id: 'de_far_shot', name: 'Far Shot / Point Blank', desc: '+20% More Mesafe Hasarı', moreDpsPct: 20 },
-      { id: 'de_bulls_eye', name: 'Called Shots', desc: '+40% Crit Şansı & +30% Crit Hasarı', incCritChance: 40, critDamageBonus: 30 },
-      { id: 'de_wind_ward', name: 'Wind Ward', desc: '+45% Increased Evasion', incEvasionPct: 45 },
-      { id: 'de_avidity', name: 'Avidity (Frenzy)', desc: '+16% More DPS & +20 Spirit', moreDpsPct: 16, bonusSpirit: 20 },
-    ],
-  },
-  {
-    id: 'pathfinder',
-    name: 'Pathfinder',
-    baseClass: 'Ranger',
-    nodes: [
-      { id: 'pf_contagious', name: 'Contagious Contamination', desc: '+24% More Poison/Ailment DPS', moreDpsPct: 24 },
-      { id: 'pf_overwhelming', name: 'Overwhelming Toxicity', desc: '+22% More Çift Zehir DPS', moreDpsPct: 22 },
-      { id: 'pf_enduring', name: 'Enduring Elixirs', desc: '+25% Maximum Life & +30% Evasion', incLifePct: 25, incEvasionPct: 30 },
-      { id: 'pf_running', name: 'Running Assault', desc: '+18% More Hareketli Saldırı DPS', moreDpsPct: 18 },
-      { id: 'pf_relentless', name: 'Relentless Pursuit', desc: '+40% Increased Evasion', incEvasionPct: 40 },
-      { id: 'pf_connected', name: 'Connected Chemistry', desc: '+25 Spirit & +20% Life', bonusSpirit: 25, incLifePct: 20 },
-    ],
-  },
-  // WARRIOR
-  {
-    id: 'titan',
-    name: 'Titan',
-    baseClass: 'Warrior',
-    nodes: [
-      { id: 'ti_hulking', name: 'Hulking Form (+50% Small Passives)', desc: '+24% More Ağaç Güçlendirmesi & +25% Life', moreDpsPct: 24, incLifePct: 25 },
-      { id: 'ti_crushing', name: 'Crushing Impacts', desc: '+20% More Heavy Stun DPS', moreDpsPct: 20 },
-      { id: 'ti_earthbreaker', name: 'Earthbreaker (Aftershocks)', desc: '+22% More Slam DPS', moreDpsPct: 22 },
-      { id: 'ti_stone_skin', name: 'Stone Skin', desc: '+50% Increased Armour', incArmourPct: 50 },
-      { id: 'ti_mysterious', name: 'Mysterious Lineage', desc: '+25% Maximum Life', incLifePct: 25 },
-      { id: 'ti_colossal', name: 'Colossal Capacity', desc: '+30% Armour & +20 Spirit', incArmourPct: 30, bonusSpirit: 20 },
-    ],
-  },
-  {
-    id: 'warbringer',
-    name: 'Warbringer',
-    baseClass: 'Warrior',
-    nodes: [
-      { id: 'wb_anvil', name: "Anvil's Weight (Armour Break)", desc: '+22% More Fiziksel/Kırılma DPS', moreDpsPct: 22 },
-      { id: 'wb_jade', name: 'Jade Heritage', desc: '+35% Armour & +20% Life', incArmourPct: 35, incLifePct: 20 },
-      { id: 'wb_answered', name: 'Answered Call (Ancestral Spirits)', desc: '+24% More Totem/Spirit DPS', moreDpsPct: 24 },
-      { id: 'wb_renly', name: "Renly's Training", desc: '+45% Increased Armour', incArmourPct: 45 },
-      { id: 'wb_warcallers', name: "Warcaller's Bellow", desc: '+18% More Warcry DPS', moreDpsPct: 18 },
-      { id: 'wb_turtle', name: 'Turtle Charm', desc: '+35% Armour & +25 Spirit', incArmourPct: 35, bonusSpirit: 25 },
-    ],
-  },
-  // WITCH
-  {
-    id: 'infernalist',
-    name: 'Infernalist',
-    baseClass: 'Witch',
-    nodes: [
-      { id: 'inf_beidat_will', name: "Beidat's Will (Life -> Spirit)", desc: '+75 Bonus Spirit', bonusSpirit: 75 },
-      { id: 'inf_beidat_hand', name: "Beidat's Hand (Life -> ES)", desc: '+45% Maximum Energy Shield', incEsPct: 45 },
-      { id: 'inf_bringer', name: 'Bringer of Flame', desc: '+24% More Fire / Ignite DPS', moreDpsPct: 24 },
-      { id: 'inf_pyromantic', name: 'Pyromantic Pact', desc: '+22% More Infernal DPS', moreDpsPct: 22 },
-      { id: 'inf_loyal', name: 'Loyal Hellhound', desc: '+20% Life & +25% Energy Shield', incLifePct: 20, incEsPct: 25 },
-      { id: 'inf_grinning', name: 'Grinning Immolation', desc: '+45% Crit Hasarı & +25% Crit Şansı', critDamageBonus: 45, incCritChance: 25 },
-    ],
-  },
-  {
-    id: 'blood_mage',
-    name: 'Blood Mage',
-    baseClass: 'Witch',
-    nodes: [
-      { id: 'bm_gore', name: 'Gore Spike (Life -> Crit Damage)', desc: '+55% Critical Damage Bonus', critDamageBonus: 55 },
-      { id: 'bm_sunder', name: 'Sunder the Flesh (Base Crit %15)', desc: '+45% Increased Critical Hit Chance', incCritChance: 45 },
-      { id: 'bm_crimson', name: 'Crimson Power', desc: '+35% Maximum Life & +25% ES', incLifePct: 35, incEsPct: 25 },
-      { id: 'bm_vitality', name: 'Vitality Siphon', desc: '+20% More Spell Leech DPS', moreDpsPct: 20 },
-      { id: 'bm_blood_barbs', name: 'Blood Barbs', desc: '+22% More Bleed / Elemental DPS', moreDpsPct: 22 },
-      { id: 'bm_grasping', name: 'Grasping Wounds', desc: '+30% Maximum Life', incLifePct: 30 },
-    ],
-  },
-];
+const NumberField: React.FC<NumberFieldProps> = ({
+  value,
+  min,
+  max,
+  onChange,
+  title,
+  style,
+}) => {
+  const [text, setText] = useState<string>(String(value));
 
-const AVAILABLE_STATS = [
-  'Lightning Damage',
-  'Fire Damage',
-  'Cold Damage',
-  'Physical Damage',
-  'Spell Damage',
-  'Critical',
-  'Attack Speed',
-  'Cast Speed',
-  'Minion',
-  'Maximum Life',
-  'Energy Shield',
-  'Armour',
-  'Evasion',
-  'Spirit',
-];
+  useEffect(() => {
+    setText(String(value));
+  }, [value]);
 
-const CORE_SPIRIT_BUFFS: SpiritBuffDef[] = [
-  {
-    id: 'herald_of_thunder',
-    name: 'Herald of Thunder',
-    cost: 30,
-    category: 'Herald',
-    effectLabel: '+18% More Lightning / Shock DPS',
-    moreDpsPct: 18,
-    requiredTag: 'lightning',
-  },
-  {
-    id: 'herald_of_ash',
-    name: 'Herald of Ash',
-    cost: 30,
-    category: 'Herald',
-    effectLabel: '+18% More Fire / Overkill DPS',
-    moreDpsPct: 18,
-    requiredTag: 'fire',
-  },
-  {
-    id: 'herald_of_ice',
-    name: 'Herald of Ice',
-    cost: 30,
-    category: 'Herald',
-    effectLabel: '+16% More Cold DPS, +15% Crit',
-    moreDpsPct: 16,
-    requiredTag: 'cold',
-    incCritChance: 15,
-  },
-  {
-    id: 'archmage',
-    name: 'Archmage',
-    cost: 100,
-    category: 'Aura / Buff',
-    effectLabel: '+38% More Spell Lightning Hasarı',
-    moreDpsPct: 38,
-    requiredTag: 'spell',
-  },
-  {
-    id: 'cast_on_shock',
-    name: 'Cast on Shock',
-    cost: 60,
-    category: 'Meta',
-    effectLabel: '+28% More Meta Tetikleyici DPS',
-    moreDpsPct: 28,
-  },
-  {
-    id: 'cast_on_freeze',
-    name: 'Cast on Freeze',
-    cost: 60,
-    category: 'Meta',
-    effectLabel: '+26% More Meta Tetikleyici DPS',
-    moreDpsPct: 26,
-  },
-  {
-    id: 'wind_dancer',
-    name: 'Wind Dancer',
-    cost: 30,
-    category: 'Aura / Buff',
-    effectLabel: '+35% Increased Evasion (EHP)',
-    incEvasionPct: 35,
-  },
-  {
-    id: 'grim_feast',
-    name: 'Grim Feast',
-    cost: 30,
-    category: 'Aura / Buff',
-    effectLabel: '+30% Increased Energy Shield (EHP)',
-    incEsPct: 30,
-  },
-  {
-    id: 'charge_infusion',
-    name: 'Charge Infusion',
-    cost: 30,
-    category: 'Aura / Buff',
-    effectLabel: '+25% Increased Critical Hit Chance',
-    incCritChance: 25,
-  },
-  {
-    id: 'berserk',
-    name: 'Berserk',
-    cost: 30,
-    category: 'Aura / Buff',
-    effectLabel: '+22% More Attack Hasarı',
-    moreDpsPct: 22,
-    requiredTag: 'attack',
-  },
-];
-
-function normalizeToHundred(items: StatWeightItem[]): StatWeightItem[] {
-  if (items.length === 0) return [];
-  if (items.length === 1) return [{ ...items[0], weight: 100 }];
-
-  const total = items.reduce((sum, i) => sum + Math.max(0, i.weight), 0);
-  if (total === 0) {
-    const base = Math.floor(100 / items.length);
-    const rem = 100 - base * items.length;
-    return items.map((item, idx) => ({
-      ...item,
-      weight: base + (idx === 0 ? rem : 0),
-    }));
-  }
-
-  const raw = items.map((item) => (Math.max(0, item.weight) / total) * 100);
-  const floored = raw.map((v) => Math.floor(v));
-  let remainder = 100 - floored.reduce((s, v) => s + v, 0);
-
-  const order = raw
-    .map((v, idx) => ({ idx, frac: v - floored[idx] }))
-    .sort((a, b) => b.frac - a.frac);
-
-  for (let i = 0; i < remainder; i++) {
-    floored[order[i % order.length].idx] += 1;
-  }
-
-  return items.map((item, idx) => ({
-    ...item,
-    weight: floored[idx],
-  }));
-}
-
-function rebalanceWeights(
-  items: StatWeightItem[],
-  changedStat: string,
-  requestedValue: number
-): StatWeightItem[] {
-  if (items.length === 0) return [];
-  if (items.length === 1) return [{ ...items[0], weight: 100 }];
-
-  const clampedVal = Math.max(0, Math.min(100, Math.round(requestedValue)));
-  const remaining = 100 - clampedVal;
-  const others = items.filter((i) => i.stat !== changedStat);
-  const othersTotal = others.reduce((sum, i) => sum + i.weight, 0);
-
-  const otherAllocations = new Map<string, number>();
-
-  if (remaining === 0) {
-    others.forEach((o) => otherAllocations.set(o.stat, 0));
-  } else if (othersTotal === 0) {
-    const base = Math.floor(remaining / others.length);
-    let rem = remaining - base * others.length;
-    others.forEach((o, idx) => {
-      otherAllocations.set(o.stat, base + (idx < rem ? 1 : 0));
-    });
-  } else {
-    const raw = others.map((o) => (o.weight / othersTotal) * remaining);
-    const floored = raw.map((v) => Math.floor(v));
-    let rem = remaining - floored.reduce((s, v) => s + v, 0);
-
-    const order = raw
-      .map((v, idx) => ({ idx, frac: v - floored[idx] }))
-      .sort((a, b) => b.frac - a.frac);
-
-    for (let i = 0; i < rem; i++) {
-      floored[order[i % order.length].idx] += 1;
+  const commit = () => {
+    const trimmed = text.trim();
+    if (trimmed === '') {
+      const clamped = clampInt(min, min, max);
+      setText(String(clamped));
+      onChange(clamped);
+      return;
     }
-
-    others.forEach((o, idx) => {
-      otherAllocations.set(o.stat, floored[idx]);
-    });
-  }
-
-  return items.map((item) =>
-    item.stat === changedStat
-      ? { ...item, weight: clampedVal }
-      : { ...item, weight: otherAllocations.get(item.stat) ?? 0 }
-  );
-}
-
-// Herhangi bir build konfigürasyonunun özet metriklerini hesaplayan saf yardımcı
-function evaluateBuildSnapshot(
-  b: {
-    allocatedIds: number[];
-    weaponBaseDps: number;
-    baseGemLevel: number;
-    bonusSkillLevels: number;
-    gearSpirit?: number;
-    activeSpiritIds?: string[];
-    ascendancyId?: string;
-    ascendancyNodeIds?: string[];
-  },
-  nodes: Record<number, PassiveNode>
-) {
-  let incLife = 0;
-  let flatLife = 0;
-  let incEs = 0;
-  let flatEs = 0;
-  let incArmour = 0;
-  let incEvasion = 0;
-  let incCritChance = 0;
-  let critDamageBonus = 0;
-  let allAttr = 0;
-  let treeSpirit = 0;
-  let incDamage = 0;
-  let incSpeed = 0;
-
-  for (const id of b.allocatedIds || []) {
-    const node = nodes[id];
-    if (!node) continue;
-    for (const line of node.stats) {
-      const match = line.match(/([+-]?\d+(?:\.\d+)?)\s*(%?)\s*(.*)/);
-      if (!match) continue;
-      const val = parseFloat(match[1]);
-      const pct = match[2];
-      const l = `${pct} ${match[3]}`.trim().toLowerCase();
-
-      if (l.includes('to any attribute')) allAttr += val;
-      if (l.includes('to maximum life') && !l.startsWith('%')) flatLife += val;
-      if (l.includes('increased maximum life')) incLife += val;
-      if (l.includes('to maximum energy shield') && !l.startsWith('%')) flatEs += val;
-      if (l.includes('increased maximum energy shield') || l.includes('increased energy shield'))
-        incEs += val;
-      if (l.includes('increased armour')) incArmour += val;
-      if (l.includes('increased evasion')) incEvasion += val;
-      if (l.includes('critical hit chance')) incCritChance += val;
-      if (l.includes('critical damage bonus')) critDamageBonus += val;
-      if (l.includes('to maximum spirit') || l === 'to spirit') treeSpirit += val;
-      if (l.startsWith('%') && l.includes('speed')) incSpeed += val;
-      if (l.startsWith('%') && l.includes('damage') && !l.includes('taken') && !l.includes('bonus'))
-        incDamage += val;
-    }
-  }
-
-  const asc = ASCENDANCIES.find((a) => a.id === b.ascendancyId);
-  const ascNodes = asc
-    ? asc.nodes.filter((n) => (b.ascendancyNodeIds || []).includes(n.id)).slice(0, 4)
-    : [];
-
-  let ascDpsFactor = 1.0;
-  let ascSpirit = 0;
-  for (const n of ascNodes) {
-    if (n.incLifePct) incLife += n.incLifePct;
-    if (n.incEsPct) incEs += n.incEsPct;
-    if (n.incArmourPct) incArmour += n.incArmourPct;
-    if (n.incEvasionPct) incEvasion += n.incEvasionPct;
-    if (n.incCritChance) incCritChance += n.incCritChance;
-    if (n.critDamageBonus) critDamageBonus += n.critDamageBonus;
-    if (n.bonusSpirit) ascSpirit += n.bonusSpirit;
-    if (n.moreDpsPct) ascDpsFactor *= 1 + n.moreDpsPct / 100;
-  }
-
-  const activeBuffs = CORE_SPIRIT_BUFFS.filter((sb) =>
-    (b.activeSpiritIds || []).includes(sb.id)
-  );
-  let spiritDpsFactor = 1.0;
-  for (const sb of activeBuffs) {
-    if (sb.incCritChance) incCritChance += sb.incCritChance;
-    if (sb.incEvasionPct) incEvasion += sb.incEvasionPct;
-    if (sb.incEsPct) incEs += sb.incEsPct;
-    if (sb.moreDpsPct) spiritDpsFactor *= 1 + sb.moreDpsPct / 100;
-  }
-
-  const totalLife = Math.round((1150 + flatLife + allAttr * 2) * (1 + Math.max(incLife, 0) / 100));
-  const totalEs = Math.round((450 + flatEs) * (1 + Math.max(incEs, 0) / 100));
-  const totalArmour = Math.round(1800 * (1 + Math.max(incArmour, 0) / 100));
-  const totalEvasion = Math.round(1800 * (1 + Math.max(incEvasion, 0) / 100));
-
-  const physMit = totalArmour / (totalArmour + 8000);
-  const evadeMit = Math.min(totalEvasion / (totalEvasion + 3500), 0.55);
-  const effectiveHp = Math.round(
-    (totalLife + totalEs) / Math.max(1 - physMit * 0.6 - evadeMit * 0.45, 0.25)
-  );
-
-  const effectiveCrit = Math.min(Math.max(8.0 * (1 + incCritChance / 100), 1.0), 100.0);
-  const critMultPct = 100 + critDamageBonus;
-  const critFactor = 1 + (effectiveCrit / 100) * (Math.max(critMultPct, 0) / 100);
-
-  const effLevel = (b.baseGemLevel || 20) + (b.bonusSkillLevels || 0);
-  const levelFactor = Math.pow(1.115, Math.max(effLevel - 1, 0));
-  const treeFactor = (1 + Math.max(incDamage, 0) / 100) * (1 + Math.max(incSpeed, 0) / 100);
-
-  const estDps = Math.round(
-    (b.weaponBaseDps || 520) * levelFactor * treeFactor * spiritDpsFactor * ascDpsFactor * critFactor
-  );
-
-  const maxSpirit = Math.round(100 + (b.gearSpirit || 0) + treeSpirit + ascSpirit);
-
-  return {
-    points: (b.allocatedIds || []).length,
-    effectiveHp,
-    totalLife,
-    totalEs,
-    totalArmour,
-    totalEvasion,
-    effectiveCrit: Number(effectiveCrit.toFixed(1)),
-    estDps,
-    maxSpirit,
-    ascName: asc?.name || '-',
+    const parsed = Number(trimmed);
+    const clamped = clampInt(Number.isFinite(parsed) ? parsed : min, min, max);
+    setText(String(clamped));
+    onChange(clamped);
   };
-}
+
+  return (
+    <input
+      type="text"
+      inputMode="numeric"
+      value={text}
+      title={title}
+      onChange={(e) => {
+        const next = e.target.value;
+        if (/^-?\d*$/.test(next)) {
+          setText(next);
+          if (next !== '' && next !== '-') {
+            const num = Number(next);
+            if (Number.isFinite(num) && num >= min && num <= max) {
+              onChange(Math.round(num));
+            }
+          }
+        }
+      }}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') {
+          e.currentTarget.blur();
+        }
+      }}
+      style={style}
+    />
+  );
+};
 
 export default function App() {
   const [nodes, setNodes] = useState<Record<number, PassiveNode>>({});
@@ -578,20 +179,33 @@ export default function App() {
   const [spriteSheets, setSpriteSheets] = useState<Record<string, string>>({});
   const [selectedStartId, setSelectedStartId] = useState<number>(0);
   const [allocatedIds, setAllocatedIds] = useState<number[]>([]);
-  const [status, setStatus] = useState<string>('Hazır (Veri güncellemek için Ctrl+U)');
+  const [status, setStatus] = useState<string>('Hazır');
+  const [toast, setToast] = useState<{ text: string; tone: 'info' | 'success' | 'error' } | null>(
+    null
+  );
+  const [isUpdating, setIsUpdating] = useState<boolean>(false);
   const [maxPoints, setMaxPoints] = useState<number>(80);
 
-  // Ascendancy (Alt Sınıf - 8 Puan) State'leri
-  const [selectedAscendancyId, setSelectedAscendancyId] = useState<string>('witchhunter');
-  const [selectedAscNodeIds, setSelectedAscNodeIds] = useState<string[]>([
-    'wh_pitiless',
-    'wh_judge',
-    'wh_weapon_master',
-    'wh_sorcery',
-  ]);
+  const selectedStartIdRef = useRef<number>(selectedStartId);
+  selectedStartIdRef.current = selectedStartId;
+
+  const showNotice = (text: string, tone: 'info' | 'success' | 'error' = 'info') => {
+    setStatus(text);
+    setToast({ text, tone });
+  };
+
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4500);
+    return () => clearTimeout(t);
+  }, [toast]);
+
+  // Ascendancy
+  const [selectedAscendancyId, setSelectedAscendancyId] = useState<string>('');
+  const [selectedAscNodeIds, setSelectedAscNodeIds] = useState<string[]>([]);
   const [isAscDrawerOpen, setIsAscDrawerOpen] = useState<boolean>(false);
 
-  // Kaydırma çubuklu %100 Dengeli Çoklu Stat Ağırlıkları
+  // Stat Ağırlıkları
   const [statWeights, setStatWeights] = useState<StatWeightItem[]>([
     { stat: 'Lightning Damage', weight: 60 },
     { stat: 'Critical', weight: 25 },
@@ -600,32 +214,62 @@ export default function App() {
   const [isWeightDrawerOpen, setIsWeightDrawerOpen] = useState<boolean>(false);
   const [newStatName, setNewStatName] = useState<string>('Maximum Life');
 
-  // Ağaç üzerinde düğüm/Keystone arama ve odaklanma
+  const drawerContainerRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const handleGlobalKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsAscDrawerOpen(false);
+        setIsWeightDrawerOpen(false);
+      }
+    };
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (!isAscDrawerOpen && !isWeightDrawerOpen) return;
+      if (drawerContainerRef.current && !drawerContainerRef.current.contains(e.target as Node)) {
+        setIsAscDrawerOpen(false);
+        setIsWeightDrawerOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKey);
+    window.addEventListener('mousedown', handleOutsideClick);
+    return () => {
+      window.removeEventListener('keydown', handleGlobalKey);
+      window.removeEventListener('mousedown', handleOutsideClick);
+    };
+  }, [isAscDrawerOpen, isWeightDrawerOpen]);
+
+  // Ağaç Arama
   const [nodeSearchQuery, setNodeSearchQuery] = useState<string>('');
   const [focusIndex, setFocusIndex] = useState<number>(0);
   const [focusTrigger, setFocusTrigger] = useState<{ nodeId: number; seq: number } | null>(null);
 
-  // Sağ panel sekmesi, Gem ve Silah/+Skill Level state'leri
+  // Sağ Panel & Gem / Silah / Spirit
   const [rightTab, setRightTab] = useState<'stats' | 'gems' | 'builds'>('stats');
   const [activeGems, setActiveGems] = useState<GemData[]>([]);
   const [selectedSkillId, setSelectedSkillId] = useState<string>('');
   const [gemSearch, setGemSearch] = useState<string>('');
   const [recommendedSupports, setRecommendedSupports] = useState<SupportRecommendation[]>([]);
 
-  // Silah & +Skill Level Simülatörü
   const [weaponBaseDps, setWeaponBaseDps] = useState<number>(520);
   const [baseGemLevel, setBaseGemLevel] = useState<number>(20);
-  const [bonusSkillLevels, setBonusSkillLevels] = useState<number>(5);
+  const [bonusSkillLevels, setBonusSkillLevels] = useState<number>(0);
 
-  // Spirit Bütçesi & Aura / Herald Yöneticisi
-  const [gearSpirit, setGearSpirit] = useState<number>(60);
-  const [activeSpiritIds, setActiveSpiritIds] = useState<string[]>([
-    'herald_of_thunder',
-    'grim_feast',
-    'charge_infusion',
-  ]);
+  const [gearSpirit, setGearSpirit] = useState<number>(0);
+  const [activeSpiritIds, setActiveSpiritIds] = useState<string[]>([]);
 
-  // Build Kaydetme, Kıyaslama & Paylaşım Kodu
+  // Rust Hesaplama Sonuçları
+  const [currentEvaluation, setCurrentEvaluation] = useState<BuildEvaluationResult>(EMPTY_EVAL);
+  const [comparisonResults, setComparisonResults] = useState<{
+    leftName: string;
+    rightName: string;
+    left: BuildEvaluationResult;
+    right: BuildEvaluationResult;
+    sharedNodes: number;
+    onlyLeftNodes: number;
+    onlyRightNodes: number;
+  } | null>(null);
+
+  // Build Kayıt & Paylaşım
   const [buildName, setBuildName] = useState<string>('');
   const [savedBuilds, setSavedBuilds] = useState<SavedBuild[]>(() => {
     try {
@@ -648,19 +292,20 @@ export default function App() {
     }
   };
 
-  // Seçili sınıfa ait Ascendancy listesi ve aktif Ascendancy objesi
-  const selectedBaseClassName = useMemo(() => {
-    return classes.find((c) => c.start_node_id === selectedStartId)?.name || 'Mercenary';
-  }, [classes, selectedStartId]);
+  const selectedBaseClassName = useMemo(
+    () => classes.find((c) => c.start_node_id === selectedStartId)?.name || '',
+    [classes, selectedStartId]
+  );
 
   const availableAscendancies = useMemo(() => {
-    const matched = ASCENDANCIES.filter(
+    if (!selectedBaseClassName) return ASCENDANCIES;
+    return ASCENDANCIES.filter(
       (a) => a.baseClass.toLowerCase() === selectedBaseClassName.toLowerCase()
     );
-    return matched.length > 0 ? matched : ASCENDANCIES;
   }, [selectedBaseClassName]);
 
   const activeAscendancy = useMemo(() => {
+    if (availableAscendancies.length === 0) return undefined;
     return (
       availableAscendancies.find((a) => a.id === selectedAscendancyId) ||
       availableAscendancies[0]
@@ -674,6 +319,212 @@ export default function App() {
       .slice(0, LIMITS.maxAscendancyNodes);
   }, [activeAscendancy, selectedAscNodeIds]);
 
+  const allSpiritBuffs = useMemo(() => {
+    const list: SpiritBuffDef[] = [...CORE_SPIRIT_BUFFS];
+    const existingNames = new Set(list.map((b) => b.name.toLowerCase()));
+
+    for (const g of activeGems) {
+      if (g.spirit_cost > 0 && !existingNames.has(g.name.toLowerCase())) {
+        existingNames.add(g.name.toLowerCase());
+        list.push({
+          id: g.id,
+          name: g.name,
+          cost: g.spirit_cost,
+          category: 'Aura / Buff',
+          effectLabel: '+15% More Sinerji Hasarı',
+          moreDpsPct: 15,
+        });
+      }
+    }
+    return list;
+  }, [activeGems]);
+
+  // Build isteğini Rust formatına dönüştüren yardımcı
+  const buildRustRequest = useCallback(
+    (
+      b: {
+        allocatedIds: number[];
+        selectedSkillId?: string;
+        weaponBaseDps: number;
+        baseGemLevel: number;
+        bonusSkillLevels: number;
+        gearSpirit?: number;
+        activeSpiritIds?: string[];
+        ascendancyId?: string;
+        ascendancyNodeIds?: string[];
+      },
+      supportsList: SupportRecommendation[] = []
+    ) => {
+      const asc = ASCENDANCIES.find((a) => a.id === b.ascendancyId);
+      const ascNodes = asc
+        ? asc.nodes
+            .filter((n) => (b.ascendancyNodeIds || []).includes(n.id))
+            .slice(0, LIMITS.maxAscendancyNodes)
+            .map((n) => ({
+              id: n.id,
+              name: n.name,
+              more_dps_pct: n.moreDpsPct || 0,
+              inc_crit_chance: n.incCritChance || 0,
+              crit_damage_bonus: n.critDamageBonus || 0,
+              inc_life_pct: n.incLifePct || 0,
+              inc_es_pct: n.incEsPct || 0,
+              inc_armour_pct: n.incArmourPct || 0,
+              inc_evasion_pct: n.incEvasionPct || 0,
+              bonus_spirit: n.bonusSpirit || 0,
+            }))
+        : [];
+
+      const spiritBuffs = allSpiritBuffs
+        .filter((sb) => (b.activeSpiritIds || []).includes(sb.id))
+        .map((sb) => ({
+          id: sb.id,
+          name: sb.name,
+          cost: sb.cost,
+          more_dps_pct: sb.moreDpsPct || 0,
+          required_tag: sb.requiredTag || null,
+          inc_crit_chance: sb.incCritChance || 0,
+          inc_evasion_pct: sb.incEvasionPct || 0,
+          inc_es_pct: sb.incEsPct || 0,
+        }));
+
+      return {
+        allocated_ids: b.allocatedIds || [],
+        selected_skill_id: b.selectedSkillId || null,
+        weapon_base_dps: b.weaponBaseDps || 520,
+        base_gem_level: b.baseGemLevel || 20,
+        bonus_skill_levels: b.bonusSkillLevels || 0,
+        gear_spirit: b.gearSpirit || 0,
+        active_spirit_buffs: spiritBuffs,
+        active_ascendancy_nodes: ascNodes,
+        supports: supportsList.slice(0, 5).map((s) => ({
+          name: s.name,
+          multiplier_pct: s.multiplier_pct,
+        })),
+      };
+    },
+    [allSpiritBuffs]
+  );
+
+  // Aktif build hesaplamasını Rust motorunda çalıştır
+  useEffect(() => {
+    if (Object.keys(nodes).length === 0) return;
+
+    const req = buildRustRequest(
+      {
+        allocatedIds,
+        selectedSkillId,
+        weaponBaseDps,
+        baseGemLevel,
+        bonusSkillLevels,
+        gearSpirit,
+        activeSpiritIds,
+        ascendancyId: activeAscendancy?.id,
+        ascendancyNodeIds: activeAscNodes.map((n) => n.id),
+      },
+      recommendedSupports
+    );
+
+    invoke<BuildEvaluationResult>('evaluate_build', { req })
+      .then((res) => setCurrentEvaluation(res))
+      .catch(() => {});
+  }, [
+    nodes,
+    allocatedIds,
+    selectedSkillId,
+    weaponBaseDps,
+    baseGemLevel,
+    bonusSkillLevels,
+    gearSpirit,
+    activeSpiritIds,
+    activeAscendancy,
+    activeAscNodes,
+    recommendedSupports,
+    buildRustRequest,
+  ]);
+
+  // İki build kıyaslamasını Rust motorunda toplu çalıştır
+  useEffect(() => {
+    if (Object.keys(nodes).length === 0 || savedBuilds.length === 0) {
+      setComparisonResults(null);
+      return;
+    }
+
+    const currentSnapshot = {
+      id: 'CURRENT',
+      name: `Aktif Build (${activeAscendancy?.name || selectedBaseClassName || 'Mevcut'})`,
+      allocatedIds,
+      selectedSkillId,
+      weaponBaseDps,
+      baseGemLevel,
+      bonusSkillLevels,
+      gearSpirit,
+      activeSpiritIds,
+      ascendancyId: activeAscendancy?.id,
+      ascendancyNodeIds: activeAscNodes.map((n) => n.id),
+    };
+
+    const resolveBuild = (id: string) =>
+      id === 'CURRENT' ? currentSnapshot : savedBuilds.find((b) => b.id === id) || null;
+
+    const leftBuild = resolveBuild(compareLeftId) || currentSnapshot;
+    const rightBuild =
+      resolveBuild(compareRightId) || savedBuilds.find((b) => b.id !== leftBuild.id) || null;
+
+    if (!rightBuild) {
+      setComparisonResults(null);
+      return;
+    }
+
+    const leftReq = buildRustRequest(
+      leftBuild,
+      leftBuild.id === 'CURRENT' ? recommendedSupports : []
+    );
+    const rightReq = buildRustRequest(
+      rightBuild,
+      rightBuild.id === 'CURRENT' ? recommendedSupports : []
+    );
+
+    invoke<BuildEvaluationResult[]>('evaluate_builds_batch', {
+      requests: [leftReq, rightReq],
+    })
+      .then(([leftRes, rightRes]) => {
+        if (!leftRes || !rightRes) return;
+        const setLeft = new Set(leftBuild.allocatedIds || []);
+        const setRight = new Set(rightBuild.allocatedIds || []);
+        let sharedNodes = 0;
+        for (const nid of setLeft) {
+          if (setRight.has(nid)) sharedNodes++;
+        }
+        setComparisonResults({
+          leftName: leftBuild.name,
+          rightName: rightBuild.name,
+          left: leftRes,
+          right: rightRes,
+          sharedNodes,
+          onlyLeftNodes: setLeft.size - sharedNodes,
+          onlyRightNodes: setRight.size - sharedNodes,
+        });
+      })
+      .catch(() => {});
+  }, [
+    nodes,
+    savedBuilds,
+    compareLeftId,
+    compareRightId,
+    allocatedIds,
+    selectedSkillId,
+    weaponBaseDps,
+    baseGemLevel,
+    bonusSkillLevels,
+    gearSpirit,
+    activeSpiritIds,
+    activeAscendancy,
+    selectedBaseClassName,
+    activeAscNodes,
+    recommendedSupports,
+    buildRustRequest,
+  ]);
+
   const handleClassChange = (newStartId: number) => {
     setSelectedStartId(newStartId);
     setAllocatedIds([newStartId]);
@@ -681,27 +532,20 @@ export default function App() {
     const firstAsc = ASCENDANCIES.find(
       (a) => a.baseClass.toLowerCase() === clsName.toLowerCase()
     );
-    if (firstAsc) {
-      setSelectedAscendancyId(firstAsc.id);
-      setSelectedAscNodeIds(firstAsc.nodes.slice(0, 4).map((n) => n.id));
-    }
+    setSelectedAscendancyId(firstAsc ? firstAsc.id : '');
+    setSelectedAscNodeIds([]);
   };
 
   const handleAscendancyChange = (newAscId: string) => {
     setSelectedAscendancyId(newAscId);
-    const found = ASCENDANCIES.find((a) => a.id === newAscId);
-    if (found) {
-      setSelectedAscNodeIds(found.nodes.slice(0, 4).map((n) => n.id));
-    }
+    setSelectedAscNodeIds([]);
   };
 
   const toggleAscendancyNode = (nodeId: string) => {
     setSelectedAscNodeIds((prev) => {
-      if (prev.includes(nodeId)) {
-        return prev.filter((x) => x !== nodeId);
-      }
+      if (prev.includes(nodeId)) return prev.filter((x) => x !== nodeId);
       if (prev.length >= LIMITS.maxAscendancyNodes) {
-        setStatus('Maksimum 8 Ascendancy puanına (4 Major Notable) ulaşıldı.');
+        showNotice('Maksimum 8 Ascendancy puanına (4 Major Notable) ulaşıldı.', 'error');
         return prev;
       }
       return [...prev, nodeId];
@@ -727,7 +571,6 @@ export default function App() {
     const clean = statToAdd.trim();
     if (!clean) return;
     if (statWeights.some((s) => s.stat.toLowerCase() === clean.toLowerCase())) return;
-
     const initialShare =
       statWeights.length === 0 ? 100 : Math.round(100 / (statWeights.length + 1));
     setStatWeights((prev) =>
@@ -736,30 +579,22 @@ export default function App() {
   };
 
   const removeStatWeight = (statToRemove: string) => {
-    setStatWeights((prev) =>
-      normalizeToHundred(prev.filter((s) => s.stat !== statToRemove))
-    );
+    setStatWeights((prev) => normalizeToHundred(prev.filter((s) => s.stat !== statToRemove)));
   };
 
   const distributeEqually = () => {
     if (statWeights.length === 0) return;
-    setStatWeights((prev) =>
-      normalizeToHundred(prev.map((item) => ({ ...item, weight: 1 })))
-    );
+    setStatWeights((prev) => normalizeToHundred(prev.map((item) => ({ ...item, weight: 1 }))));
   };
 
-  // Harita üzerinde eşleşen düğümleri bul
   const matchedNodeIds = useMemo(() => {
     const q = nodeSearchQuery.trim().toLowerCase();
     if (q.length < 2) return [];
-
     const matches: number[] = [];
     for (const node of Object.values(nodes)) {
       const nameMatch = node.name.toLowerCase().includes(q);
       const statMatch = node.stats.some((s) => s.toLowerCase().includes(q));
-      if (nameMatch || statMatch) {
-        matches.push(node.id);
-      }
+      if (nameMatch || statMatch) matches.push(node.id);
     }
     matches.sort((a, b) => {
       const na = nodes[a];
@@ -773,12 +608,6 @@ export default function App() {
 
   useEffect(() => {
     setFocusIndex(0);
-    if (matchedNodeIds.length > 0) {
-      setFocusTrigger((prev) => ({
-        nodeId: matchedNodeIds[0],
-        seq: (prev?.seq || 0) + 1,
-      }));
-    }
   }, [matchedNodeIds]);
 
   const focusNextMatch = () => {
@@ -805,7 +634,7 @@ export default function App() {
     }
   };
 
-  const loadTreeFromRust = async () => {
+  const loadTreeFromRust = async (preserveSelection = true) => {
     try {
       const treeData = await invoke<{
         nodes: Record<number, PassiveNode>;
@@ -818,18 +647,27 @@ export default function App() {
       setSpriteSheets(treeData.sprite_sheets || {});
 
       if (treeData.classes && treeData.classes.length > 0) {
-        const startId = treeData.classes[0].start_node_id;
-        setSelectedStartId(startId);
-        const firstAsc = ASCENDANCIES.find(
-          (a) => a.baseClass.toLowerCase() === treeData.classes[0].name.toLowerCase()
-        );
-        if (firstAsc) {
-          setSelectedAscendancyId(firstAsc.id);
-          setSelectedAscNodeIds(firstAsc.nodes.slice(0, 4).map((n) => n.id));
+        const currentId = selectedStartIdRef.current;
+        const stillExists =
+          preserveSelection &&
+          currentId > 0 &&
+          treeData.classes.some((c) => c.start_node_id === currentId);
+
+        if (!stillExists) {
+          const startId = treeData.classes[0].start_node_id;
+          setSelectedStartId(startId);
+          setAllocatedIds([startId]);
+          const firstAsc = ASCENDANCIES.find(
+            (a) => a.baseClass.toLowerCase() === treeData.classes[0].name.toLowerCase()
+          );
+          setSelectedAscendancyId(firstAsc ? firstAsc.id : '');
+          setSelectedAscNodeIds([]);
         }
       } else {
         const keys = Object.keys(treeData.nodes).map(Number);
-        if (keys.length > 0) setSelectedStartId(keys[0]);
+        if (keys.length > 0 && !selectedStartIdRef.current) {
+          setSelectedStartId(keys[0]);
+        }
       }
 
       setStatus(`Ağaç yüklendi (${Object.keys(treeData.nodes).length} düğüm)`);
@@ -839,14 +677,17 @@ export default function App() {
     }
   };
 
-  const runUpdate = async () => {
-    setStatus('GitHub PoB2 reposundan yama verileri ve gemler çekiliyor...');
+  const runUpdate = async (force = false) => {
+    if (isUpdating) return;
+    setIsUpdating(true);
+    showNotice('GitHub PoB2 reposundan yama verileri kontrol ediliyor...', 'info');
     try {
-      const msg = await invoke<string>('trigger_patch_update', { force: true });
-      setStatus(msg);
-      await loadTreeFromRust();
+      const msg = await invoke<string>('trigger_patch_update', { force });
+      showNotice(msg, 'success');
     } catch (err) {
-      setStatus(`Hata: ${err}`);
+      showNotice(`Güncelleme hatası: ${err}`, 'error');
+    } finally {
+      setIsUpdating(false);
     }
   };
 
@@ -864,7 +705,7 @@ export default function App() {
     }
 
     if (Object.keys(weights).length === 0) {
-      setStatus('Lütfen Stat Ağırlıkları panelinden en az bir stat ekleyin.');
+      showNotice('Lütfen Stat Ağırlıkları panelinden en az bir stat ekleyin.', 'error');
       setIsWeightDrawerOpen(true);
       return;
     }
@@ -879,22 +720,29 @@ export default function App() {
         weights,
       });
       setAllocatedIds(resultIds);
-      setStatus(
-        `Optimizasyon tamamlandı (${activeAscendancy?.name || selectedBaseClassName}): ${resultIds.length} puan dağıtıldı.`
+      showNotice(
+        `Optimizasyon tamamlandı (${activeAscendancy?.name || selectedBaseClassName}): ${resultIds.length} puan dağıtıldı.`,
+        'success'
       );
     } catch (err) {
-      setStatus(`Optimizasyon hatası: ${err}`);
+      showNotice(`Optimizasyon hatası: ${err}`, 'error');
     }
   };
 
   const handleSaveCurrentBuild = () => {
-    const ascLabel = activeAscendancy?.name || selectedBaseClassName;
+    const ascLabel = activeAscendancy?.name || selectedBaseClassName || 'Build';
     const finalName = buildName.trim() || `${ascLabel} (${allocatedIds.length}p)`;
+
+    const now = new Date();
+    const timestamp = `${now.toLocaleDateString()} ${now.toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    })}`;
 
     const entry: SavedBuild = {
       id: Date.now().toString(),
       name: finalName,
-      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      createdAt: timestamp,
       startNodeId: selectedStartId,
       allocatedIds: allocatedIds.slice(0, LIMITS.maxPoints.max),
       targetStat: activeWeightsSummary,
@@ -916,19 +764,26 @@ export default function App() {
 
     const nextList = [entry, ...savedBuilds];
     persistBuilds(nextList);
-    if (!compareRightId) {
-      setCompareRightId(entry.id);
-    }
+    if (!compareRightId) setCompareRightId(entry.id);
     setBuildName('');
-    setStatus(`Build kaydedildi: "${finalName}"`);
+    showNotice(`Build kaydedildi: "${finalName}"`, 'success');
   };
 
   const applyBuildData = (b: Omit<SavedBuild, 'id' | 'name' | 'createdAt'>, label: string) => {
-    setSelectedStartId(b.startNodeId);
-    const safeAllocated = (b.allocatedIds || []).slice(0, LIMITS.maxPoints.max);
-    setAllocatedIds(safeAllocated);
+    const validStart = nodes[b.startNodeId] ? b.startNodeId : selectedStartId;
+    setSelectedStartId(validStart);
+
+    const validAllocated = (b.allocatedIds || [])
+      .map(Number)
+      .filter((id) => Number.isFinite(id) && Boolean(nodes[id]))
+      .slice(0, LIMITS.maxPoints.max);
+    setAllocatedIds(validAllocated);
+
     if (b.statWeights && b.statWeights.length > 0) {
-      setStatWeights(normalizeToHundred(b.statWeights));
+      const cleanWeights = b.statWeights
+        .filter((w) => w && typeof w.stat === 'string' && Number.isFinite(Number(w.weight)))
+        .map((w) => ({ stat: w.stat.slice(0, 40), weight: Math.max(0, Number(w.weight)) }));
+      if (cleanWeights.length > 0) setStatWeights(normalizeToHundred(cleanWeights));
     }
     if (typeof b.maxPoints === 'number') {
       setMaxPoints(clampInt(b.maxPoints, LIMITS.maxPoints.min, LIMITS.maxPoints.max));
@@ -950,17 +805,30 @@ export default function App() {
     if (typeof b.gearSpirit === 'number') {
       setGearSpirit(clampInt(b.gearSpirit, LIMITS.gearSpirit.min, LIMITS.gearSpirit.max));
     }
-    if (Array.isArray(b.activeSpiritIds)) setActiveSpiritIds(b.activeSpiritIds);
+    if (Array.isArray(b.activeSpiritIds)) {
+      const validSpiritIds = new Set(allSpiritBuffs.map((sb) => sb.id));
+      setActiveSpiritIds(
+        b.activeSpiritIds.filter((id): id is string => typeof id === 'string' && validSpiritIds.has(id))
+      );
+    }
     if (b.ascendancyId) {
-      setSelectedAscendancyId(b.ascendancyId);
-      if (Array.isArray(b.ascendancyNodeIds)) {
-        setSelectedAscNodeIds(b.ascendancyNodeIds.slice(0, LIMITS.maxAscendancyNodes));
+      const ascFound = ASCENDANCIES.find((a) => a.id === b.ascendancyId);
+      if (ascFound) {
+        setSelectedAscendancyId(ascFound.id);
+        if (Array.isArray(b.ascendancyNodeIds)) {
+          const validAscNodes = new Set(ascFound.nodes.map((n) => n.id));
+          setSelectedAscNodeIds(
+            b.ascendancyNodeIds
+              .filter((id): id is string => typeof id === 'string' && validAscNodes.has(id))
+              .slice(0, LIMITS.maxAscendancyNodes)
+          );
+        }
       }
     }
-    setStatus(`Build yüklendi: ${label} (${safeAllocated.length} puan)`);
+    showNotice(`Build yüklendi: ${label} (${validAllocated.length} puan)`, 'success');
   };
 
-  const generateShareCode = () => {
+  const generateShareCode = async () => {
     const payload = {
       v: 4,
       s: selectedStartId,
@@ -978,19 +846,25 @@ export default function App() {
     };
     const encoded = 'POE2TC:' + btoa(unescape(encodeURIComponent(JSON.stringify(payload))));
     setShareCodeInput(encoded);
-    navigator.clipboard?.writeText(encoded).catch(() => {});
-    setStatus('Paylaşım kodu oluşturuldu ve panoya kopyalandı!');
+    try {
+      await navigator.clipboard.writeText(encoded);
+      showNotice('Paylaşım kodu oluşturuldu ve panoya kopyalandı!', 'success');
+    } catch {
+      showNotice('Paylaşım kodu oluşturuldu (panoya erişim izni yok, kutudan kopyalayın).', 'info');
+    }
   };
 
   const importShareCode = () => {
     const raw = shareCodeInput.trim();
     if (!raw.startsWith('POE2TC:')) {
-      setStatus('Geçersiz kod! Kod "POE2TC:" ile başlamalıdır.');
+      showNotice('Geçersiz kod! Kod "POE2TC:" ile başlamalıdır.', 'error');
       return;
     }
     try {
       const jsonStr = decodeURIComponent(escape(atob(raw.slice(7))));
       const p = JSON.parse(jsonStr);
+      if (!p || typeof p !== 'object') throw new Error('Invalid payload');
+
       applyBuildData(
         {
           startNodeId: Number(p.s) || selectedStartId,
@@ -1017,7 +891,7 @@ export default function App() {
             LIMITS.bonusSkillLevels.max
           ),
           gearSpirit: clampInt(
-            typeof p.gs === 'number' ? p.gs : 60,
+            typeof p.gs === 'number' ? p.gs : 0,
             LIMITS.gearSpirit.min,
             LIMITS.gearSpirit.max
           ),
@@ -1028,7 +902,7 @@ export default function App() {
         'Paylaşım Kodu'
       );
     } catch {
-      setStatus('Paylaşım kodu çözümlenemedi (bozuk veya eksik kod).');
+      showNotice('Paylaşım kodu çözümlenemedi (bozuk veya eksik kod).', 'error');
     }
   };
 
@@ -1044,15 +918,22 @@ export default function App() {
 
   const handleToggleNode = (id: number) => {
     setAllocatedIds((prev) => {
-      if (prev.includes(id)) {
-        return prev.filter((item) => item !== id);
-      }
+      if (prev.includes(id)) return prev.filter((item) => item !== id);
       if (prev.length >= LIMITS.maxPoints.max) {
-        setStatus(`Maksimum ${LIMITS.maxPoints.max} pasif puan sınırına ulaşıldı.`);
+        showNotice(`Maksimum ${LIMITS.maxPoints.max} pasif puan sınırına ulaşıldı.`, 'error');
         return prev;
       }
       return [...prev, id];
     });
+  };
+
+  const handleSetAllocatedIds = (nextIds: number[]) => {
+    if (nextIds.length > LIMITS.maxPoints.max) {
+      showNotice(`Maksimum ${LIMITS.maxPoints.max} pasif puan sınırına ulaşıldı.`, 'error');
+      setAllocatedIds(nextIds.slice(0, LIMITS.maxPoints.max));
+      return;
+    }
+    setAllocatedIds(nextIds);
   };
 
   const toggleSpiritBuff = (id: string) => {
@@ -1061,174 +942,12 @@ export default function App() {
     );
   };
 
-  const aggregatedStats = useMemo(() => {
-    const totals: Record<string, number> = {};
-    const rawLines: string[] = [];
-
-    for (const id of allocatedIds) {
-      const node = nodes[id];
-      if (!node) continue;
-
-      for (const line of node.stats) {
-        const match = line.match(/([+-]?\d+(?:\.\d+)?)\s*(%?)\s*(.*)/);
-        if (match) {
-          const val = parseFloat(match[1]);
-          const pct = match[2];
-          const label = `${pct} ${match[3]}`.trim();
-          totals[label] = (totals[label] || 0) + val;
-        } else {
-          rawLines.push(line);
-        }
-      }
-    }
-
-    return { totals, rawLines };
-  }, [allocatedIds, nodes]);
-
-  const allSpiritBuffs = useMemo(() => {
-    const list: SpiritBuffDef[] = [...CORE_SPIRIT_BUFFS];
-    const existingNames = new Set(list.map((b) => b.name.toLowerCase()));
-
-    for (const g of activeGems) {
-      if (g.spirit_cost > 0 && !existingNames.has(g.name.toLowerCase())) {
-        existingNames.add(g.name.toLowerCase());
-        list.push({
-          id: g.id,
-          name: g.name,
-          cost: g.spirit_cost,
-          category: 'Aura / Buff',
-          effectLabel: '+15% More Sinerji Hasarı',
-          moreDpsPct: 15,
-        });
-      }
-    }
-    return list;
-  }, [activeGems]);
-
-  const spiritSummary = useMemo(() => {
-    let treeSpirit = 0;
-    for (const [label, val] of Object.entries(aggregatedStats.totals)) {
-      const l = label.toLowerCase();
-      if (l.includes('to maximum spirit') || l === 'to spirit') {
-        treeSpirit += val;
-      }
-    }
-
-    const ascSpirit = activeAscNodes.reduce((sum, n) => sum + (n.bonusSpirit || 0), 0);
-    const campaignSpirit = 100;
-    const safeGearSpirit = clampInt(gearSpirit, LIMITS.gearSpirit.min, LIMITS.gearSpirit.max);
-    const maxSpirit = Math.round(campaignSpirit + safeGearSpirit + treeSpirit + ascSpirit);
-
-    const activeBuffs = allSpiritBuffs.filter((b) => activeSpiritIds.includes(b.id));
-    const usedSpirit = activeBuffs.reduce((sum, b) => sum + b.cost, 0);
-    const remainingSpirit = maxSpirit - usedSpirit;
-
-    return {
-      maxSpirit,
-      usedSpirit,
-      remainingSpirit,
-      treeSpirit: Math.round(treeSpirit + ascSpirit),
-      activeBuffs,
-    };
-  }, [aggregatedStats, gearSpirit, allSpiritBuffs, activeSpiritIds, activeAscNodes]);
-
-  const combatSummary = useMemo(() => {
-    let incLife = 0;
-    let flatLife = 0;
-    let incEs = 0;
-    let flatEs = 0;
-    let incArmour = 0;
-    let incEvasion = 0;
-    let incCritChance = 0;
-    let critDamageBonus = 0;
-    let allAttr = 0;
-
-    for (const [label, val] of Object.entries(aggregatedStats.totals)) {
-      const l = label.toLowerCase();
-
-      if (l.includes('to any attribute')) allAttr += val;
-      if (l.includes('to maximum life') && !l.startsWith('%')) flatLife += val;
-      if (l.includes('increased maximum life')) incLife += val;
-
-      if (l.includes('to maximum energy shield') && !l.startsWith('%')) flatEs += val;
-      if (l.includes('increased maximum energy shield') || l.includes('increased energy shield'))
-        incEs += val;
-
-      if (l.includes('increased armour')) incArmour += val;
-      if (l.includes('increased evasion')) incEvasion += val;
-
-      if (l.includes('critical hit chance')) incCritChance += val;
-      if (l.includes('critical damage bonus')) critDamageBonus += val;
-    }
-
-    for (const ascNode of activeAscNodes) {
-      if (ascNode.incLifePct) incLife += ascNode.incLifePct;
-      if (ascNode.incEsPct) incEs += ascNode.incEsPct;
-      if (ascNode.incArmourPct) incArmour += ascNode.incArmourPct;
-      if (ascNode.incEvasionPct) incEvasion += ascNode.incEvasionPct;
-      if (ascNode.incCritChance) incCritChance += ascNode.incCritChance;
-      if (ascNode.critDamageBonus) critDamageBonus += ascNode.critDamageBonus;
-    }
-
-    for (const buff of spiritSummary.activeBuffs) {
-      if (buff.incCritChance) incCritChance += buff.incCritChance;
-      if (buff.incEvasionPct) incEvasion += buff.incEvasionPct;
-      if (buff.incEsPct) incEs += buff.incEsPct;
-    }
-
-    const hasInevitableCrit = recommendedSupports
-      .slice(0, 5)
-      .some((s) => s.name.toLowerCase().includes('inevitable critical'));
-    const hasSupercritical = recommendedSupports
-      .slice(0, 5)
-      .some((s) => s.name.toLowerCase().includes('supercritical'));
-
-    if (hasInevitableCrit) incCritChance += 80;
-    if (hasSupercritical) critDamageBonus += 45;
-
-    const baseLife = 1150 + flatLife + allAttr * 2;
-    const totalLife = Math.round(baseLife * (1 + Math.max(incLife, 0) / 100));
-
-    const baseEs = 450 + flatEs;
-    const totalEs = Math.round(baseEs * (1 + Math.max(incEs, 0) / 100));
-
-    const totalArmour = Math.round(1800 * (1 + Math.max(incArmour, 0) / 100));
-    const totalEvasion = Math.round(1800 * (1 + Math.max(incEvasion, 0) / 100));
-
-    const physMitigation = totalArmour / (totalArmour + 10 * 800);
-    const evadeFactor = Math.min(totalEvasion / (totalEvasion + 3500), 0.55);
-    const effectiveHp = Math.round(
-      (totalLife + totalEs) / Math.max(1 - physMitigation * 0.6 - evadeFactor * 0.45, 0.25)
-    );
-
-    const baseCrit = 8.0;
-    const effectiveCritChance = Math.min(
-      Math.max(baseCrit * (1 + incCritChance / 100), 1.0),
-      100.0
-    );
-    const totalCritMultPct = 100 + critDamageBonus;
-    const critDpsFactor =
-      1 + (effectiveCritChance / 100) * (Math.max(totalCritMultPct, 0) / 100);
-
-    return {
-      totalLife,
-      totalEs,
-      totalArmour,
-      totalEvasion,
-      effectiveHp,
-      effectiveCritChance: Number(effectiveCritChance.toFixed(1)),
-      totalCritMultPct: Math.round(totalCritMultPct),
-      critDpsFactor,
-    };
-  }, [aggregatedStats, recommendedSupports, spiritSummary.activeBuffs, activeAscNodes]);
-
   const filteredActiveGems = useMemo(() => {
     const q = gemSearch.trim().toLowerCase();
     if (!q) return activeGems;
     return activeGems.filter(
       (g) =>
-        g.name.toLowerCase().includes(q) ||
-        g.tags.some((t) => t.toLowerCase().includes(q))
+        g.name.toLowerCase().includes(q) || g.tags.some((t) => t.toLowerCase().includes(q))
     );
   }, [activeGems, gemSearch]);
 
@@ -1237,180 +956,18 @@ export default function App() {
     [activeGems, selectedSkillId]
   );
 
-  const treeDamageAndSpeedBonus = useMemo(() => {
-    let incDamage = 0;
-    let incSpeed = 0;
-    const skillTags = (selectedSkillObj?.tags || []).map((t) => t.toLowerCase());
-
-    for (const [label, val] of Object.entries(aggregatedStats.totals)) {
-      const lower = label.toLowerCase();
-      if (!lower.startsWith('%')) continue;
-
-      if (lower.includes('speed')) {
-        incSpeed += val;
-      } else if (lower.includes('damage') && !lower.includes('taken') && !lower.includes('bonus')) {
-        const isGeneric =
-          lower === '% increased damage' ||
-          lower === '% increased attack damage' ||
-          lower === '% increased spell damage';
-        const matchesSkillTag = skillTags.some((tag) => lower.includes(tag));
-        if (isGeneric || matchesSkillTag) {
-          incDamage += val;
-        }
-      }
-    }
-    return { incDamage, incSpeed };
-  }, [aggregatedStats, selectedSkillObj]);
-
-  const dpsBreakdown = useMemo(() => {
-    const topFive = recommendedSupports.slice(0, 5);
-    const supportFactor = topFive.reduce((acc, s) => acc * (1 + s.multiplier_pct / 100), 1);
-    const supportMorePct = Math.round((supportFactor - 1) * 100);
-
-    const skillTags = (selectedSkillObj?.tags || []).map((t) => t.toLowerCase());
-    let spiritDpsFactor = 1.0;
-    for (const buff of spiritSummary.activeBuffs) {
-      if (!buff.moreDpsPct) continue;
-      const tagMatches =
-        !buff.requiredTag ||
-        skillTags.length === 0 ||
-        skillTags.includes(buff.requiredTag);
-      const effectivePct = tagMatches ? buff.moreDpsPct : Math.round(buff.moreDpsPct * 0.4);
-      spiritDpsFactor *= 1 + effectivePct / 100;
-    }
-    const spiritMorePct = Math.round((spiritDpsFactor - 1) * 100);
-
-    const ascFactor = activeAscNodes.reduce(
-      (acc, n) => acc * (1 + (n.moreDpsPct || 0) / 100),
-      1.0
-    );
-    const ascMorePct = Math.round((ascFactor - 1) * 100);
-
-    const safeGemLvl = clampInt(baseGemLevel, LIMITS.baseGemLevel.min, LIMITS.baseGemLevel.max);
-    const safeBonusLvl = clampInt(
-      bonusSkillLevels,
-      LIMITS.bonusSkillLevels.min,
-      LIMITS.bonusSkillLevels.max
-    );
-    const safeWeaponDps = clampInt(
-      weaponBaseDps,
-      LIMITS.weaponBaseDps.min,
-      LIMITS.weaponBaseDps.max
-    );
-
-    const effectiveLevel = safeGemLvl + safeBonusLvl;
-    const levelFactor = Math.pow(1.115, Math.max(effectiveLevel - 1, 0));
-    const bonusLevelGainPct = Math.round((Math.pow(1.115, safeBonusLvl) - 1) * 100);
-
-    const treeFactor =
-      (1 + Math.max(treeDamageAndSpeedBonus.incDamage, 0) / 100) *
-      (1 + Math.max(treeDamageAndSpeedBonus.incSpeed, 0) / 100);
-
-    const finalDps = Math.round(
-      safeWeaponDps *
-        levelFactor *
-        treeFactor *
-        supportFactor *
-        spiritDpsFactor *
-        ascFactor *
-        combatSummary.critDpsFactor
-    );
-
-    return {
-      supportMorePct,
-      spiritMorePct,
-      ascMorePct,
-      effectiveLevel,
-      bonusLevelGainPct,
-      finalDps,
-    };
-  }, [
-    recommendedSupports,
-    selectedSkillObj,
-    spiritSummary.activeBuffs,
-    activeAscNodes,
-    weaponBaseDps,
-    baseGemLevel,
-    bonusSkillLevels,
-    treeDamageAndSpeedBonus,
-    combatSummary.critDpsFactor,
-  ]);
-
-  // İki Build Kıyaslama (Diff) Hesaplaması
-  const comparisonData = useMemo(() => {
-    const currentSnapshot = {
-      id: 'CURRENT',
-      name: `Aktif Build (${activeAscendancy?.name || selectedBaseClassName})`,
-      allocatedIds,
-      weaponBaseDps,
-      baseGemLevel,
-      bonusSkillLevels,
-      gearSpirit,
-      activeSpiritIds,
-      ascendancyId: activeAscendancy?.id,
-      ascendancyNodeIds: activeAscNodes.map((n) => n.id),
-    };
-
-    const resolveBuild = (id: string) => {
-      if (id === 'CURRENT') return currentSnapshot;
-      return savedBuilds.find((b) => b.id === id) || null;
-    };
-
-    const leftBuild = resolveBuild(compareLeftId) || currentSnapshot;
-    const rightBuild =
-      resolveBuild(compareRightId) ||
-      savedBuilds.find((b) => b.id !== leftBuild.id) ||
-      null;
-
-    if (!rightBuild) return null;
-
-    const leftEval = evaluateBuildSnapshot(leftBuild, nodes);
-    const rightEval = evaluateBuildSnapshot(rightBuild, nodes);
-
-    const setLeft = new Set(leftBuild.allocatedIds || []);
-    const setRight = new Set(rightBuild.allocatedIds || []);
-    let sharedNodes = 0;
-    for (const nid of setLeft) {
-      if (setRight.has(nid)) sharedNodes++;
-    }
-
-    return {
-      leftName: leftBuild.name,
-      rightName: rightBuild.name,
-      left: leftEval,
-      right: rightEval,
-      sharedNodes,
-      onlyLeftNodes: setLeft.size - sharedNodes,
-      onlyRightNodes: setRight.size - sharedNodes,
-    };
-  }, [
-    compareLeftId,
-    compareRightId,
-    savedBuilds,
-    nodes,
-    allocatedIds,
-    weaponBaseDps,
-    baseGemLevel,
-    bonusSkillLevels,
-    gearSpirit,
-    activeSpiritIds,
-    activeAscendancy,
-    selectedBaseClassName,
-    activeAscNodes,
-  ]);
-
   useEffect(() => {
-    loadTreeFromRust();
+    loadTreeFromRust(false);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.ctrlKey && e.key.toLowerCase() === 'u') {
         e.preventDefault();
-        runUpdate();
+        runUpdate(false);
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    const unlisten = listen<string>('game-data-updated', () => loadTreeFromRust());
+    const unlisten = listen<string>('game-data-updated', () => loadTreeFromRust(true));
 
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
@@ -1419,23 +976,17 @@ export default function App() {
   }, []);
 
   const spiritUsageRatio = Math.min(
-    (spiritSummary.usedSpirit / Math.max(spiritSummary.maxSpirit, 1)) * 100,
+    (currentEvaluation.used_spirit / Math.max(currentEvaluation.max_spirit, 1)) * 100,
     100
   );
 
+  const hasDatabase = Object.keys(nodes).length > 0;
+
   const renderDiffBadge = (diffVal: number, suffix = '') => {
-    if (diffVal === 0) {
-      return <span style={{ color: '#64748b', fontSize: 11 }}>0{suffix}</span>;
-    }
+    if (diffVal === 0) return <span style={{ color: '#64748b', fontSize: 11 }}>0{suffix}</span>;
     const positive = diffVal > 0;
     return (
-      <span
-        style={{
-          color: positive ? '#4ade80' : '#f87171',
-          fontWeight: 'bold',
-          fontSize: 11,
-        }}
-      >
+      <span style={{ color: positive ? '#4ade80' : '#f87171', fontWeight: 'bold', fontSize: 11 }}>
         {positive ? `+${diffVal.toLocaleString()}` : diffVal.toLocaleString()}
         {suffix}
       </span>
@@ -1444,7 +995,7 @@ export default function App() {
 
   return (
     <div style={{ width: '100vw', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      {/* Yatay Kaydırmalı Üst Kontrol Çubuğu */}
+      {/* Üst Kontrol Çubuğu */}
       <div
         style={{
           display: 'flex',
@@ -1461,6 +1012,7 @@ export default function App() {
         <strong style={{ color: '#f59e0b', flexShrink: 0 }}>PoE 2 Theorycrafter</strong>
 
         <select
+          aria-label="Sınıf Seçimi"
           value={selectedStartId}
           onChange={(e) => handleClassChange(Number(e.target.value))}
           style={{
@@ -1483,8 +1035,8 @@ export default function App() {
           )}
         </select>
 
-        {/* Ascendancy (Alt Sınıf - 8 Puan) Açılır Butonu */}
         <button
+          aria-expanded={isAscDrawerOpen}
           onClick={() => {
             setIsAscDrawerOpen((prev) => !prev);
             setIsWeightDrawerOpen(false);
@@ -1519,8 +1071,8 @@ export default function App() {
           <span style={{ fontSize: 10, color: '#c084fc' }}>{isAscDrawerOpen ? '▲' : '▼'}</span>
         </button>
 
-        {/* %100 Dengeli Stat Ağırlıkları Açılır Butonu */}
         <button
+          aria-expanded={isWeightDrawerOpen}
           onClick={() => {
             setIsWeightDrawerOpen((prev) => !prev);
             setIsAscDrawerOpen(false);
@@ -1540,9 +1092,7 @@ export default function App() {
             flexShrink: 0,
           }}
         >
-          <span style={{ color: '#38bdf8', fontWeight: 'bold', fontSize: 12 }}>
-            Dağılım:
-          </span>
+          <span style={{ color: '#38bdf8', fontWeight: 'bold', fontSize: 12 }}>Dağılım:</span>
           <span
             style={{
               fontSize: 12,
@@ -1558,16 +1108,12 @@ export default function App() {
           </span>
         </button>
 
-        {/* Pasif Puan Bütçesi (Sınır: 1 - 128) */}
-        <input
-          type="number"
+        <NumberField
+          value={maxPoints}
           min={LIMITS.maxPoints.min}
           max={LIMITS.maxPoints.max}
           title={`Pasif Puan Sınırı: ${LIMITS.maxPoints.min} - ${LIMITS.maxPoints.max}`}
-          value={maxPoints}
-          onChange={(e) =>
-            setMaxPoints(clampInt(Number(e.target.value), LIMITS.maxPoints.min, LIMITS.maxPoints.max))
-          }
+          onChange={setMaxPoints}
           style={{
             width: 54,
             background: '#1e2430',
@@ -1581,14 +1127,15 @@ export default function App() {
 
         <button
           onClick={runOptimizer}
+          disabled={!hasDatabase}
           style={{
-            background: '#f59e0b',
+            background: hasDatabase ? '#f59e0b' : '#475569',
             color: '#000',
             fontWeight: 'bold',
             border: 'none',
             padding: '6px 12px',
             borderRadius: 4,
-            cursor: 'pointer',
+            cursor: hasDatabase ? 'pointer' : 'not-allowed',
             flexShrink: 0,
           }}
         >
@@ -1596,7 +1143,13 @@ export default function App() {
         </button>
 
         <button
-          onClick={() => setAllocatedIds([])}
+          onClick={() => {
+            if (allocatedIds.length <= 1) return;
+            if (window.confirm('Seçili tüm pasif düğümler sıfırlansın mı?')) {
+              setAllocatedIds(selectedStartId ? [selectedStartId] : []);
+              showNotice('Pasif ağaç sıfırlandı.', 'info');
+            }
+          }}
           style={{
             background: '#1e2430',
             color: '#cbd5e1',
@@ -1611,31 +1164,82 @@ export default function App() {
         </button>
 
         <button
-          onClick={runUpdate}
+          onClick={() => runUpdate(false)}
+          disabled={isUpdating}
           style={{
             background: '#334155',
             color: '#fff',
             border: 'none',
             padding: '6px 10px',
             borderRadius: 4,
-            cursor: 'pointer',
+            cursor: isUpdating ? 'wait' : 'pointer',
             flexShrink: 0,
           }}
         >
-          Patch Güncelle (Ctrl+U)
+          {isUpdating ? 'Güncelleniyor...' : 'Patch Güncelle (Ctrl+U)'}
         </button>
 
-        <span style={{ marginLeft: 'auto', fontSize: 12, color: '#94a3b8', flexShrink: 0 }}>
+        <span
+          aria-live="polite"
+          style={{ marginLeft: 'auto', fontSize: 12, color: '#94a3b8', flexShrink: 0 }}
+        >
           {status}
         </span>
       </div>
 
-      {/* Ana Alan: Sol Canvas + Sağ Sekmeli Panel */}
-      <div style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}>
+      {/* Ana Alan */}
+      <div
+        ref={drawerContainerRef}
+        style={{ flex: 1, display: 'flex', overflow: 'hidden', position: 'relative' }}
+      >
         <div style={{ flex: 1, position: 'relative' }}>
-          {/* Ascendancy (Alt Sınıf - 8 Puan) Seçim Çekmecesi */}
+          {!hasDatabase && (
+            <div
+              style={{
+                position: 'absolute',
+                inset: 0,
+                zIndex: 18,
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                background: 'rgba(7, 9, 14, 0.92)',
+                gap: 12,
+                padding: 24,
+                textAlign: 'center',
+              }}
+            >
+              <strong style={{ fontSize: 18, color: '#f8fafc' }}>
+                Yetenek Ağacı Veritabanı Bulunamadı
+              </strong>
+              <p style={{ fontSize: 13, color: '#94a3b8', maxWidth: 420, margin: 0 }}>
+                Path of Building PoE 2 verilerini ve yetenek ağacı görsellerini indirerek
+                planlamaya başlayabilirsiniz.
+              </p>
+              <button
+                onClick={() => runUpdate(false)}
+                disabled={isUpdating}
+                style={{
+                  background: '#f59e0b',
+                  color: '#000',
+                  fontWeight: 'bold',
+                  border: 'none',
+                  borderRadius: 6,
+                  padding: '10px 18px',
+                  fontSize: 13,
+                  cursor: isUpdating ? 'wait' : 'pointer',
+                }}
+              >
+                {isUpdating ? 'Veriler İndiriliyor...' : 'Verileri İndir'}
+              </button>
+            </div>
+          )}
+
+          {/* Ascendancy Çekmecesi */}
           {isAscDrawerOpen && activeAscendancy && (
             <div
+              role="dialog"
+              aria-label="Ascendancy Seçimi"
               style={{
                 position: 'absolute',
                 top: 12,
@@ -1674,6 +1278,7 @@ export default function App() {
                   </span>
                 </div>
                 <button
+                  aria-label="Kapat"
                   onClick={() => setIsAscDrawerOpen(false)}
                   style={{
                     background: 'transparent',
@@ -1712,17 +1317,22 @@ export default function App() {
                 })}
               </div>
 
-              <div style={{ fontSize: 11, color: '#94a3b8' }}>
-                Maksimum <b>4 Major Ascendancy Notable</b> (8 Puan) seçebilirsin:
-              </div>
-
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {activeAscendancy.nodes.map((node) => {
                   const active = selectedAscNodeIds.includes(node.id);
                   return (
                     <div
                       key={node.id}
+                      role="checkbox"
+                      aria-checked={active}
+                      tabIndex={0}
                       onClick={() => toggleAscendancyNode(node.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          toggleAscendancyNode(node.id);
+                        }
+                      }}
                       style={{
                         padding: '8px 10px',
                         borderRadius: 6,
@@ -1737,7 +1347,8 @@ export default function App() {
                     >
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
                         <strong style={{ fontSize: 12, color: active ? '#f3e8ff' : '#f8fafc' }}>
-                          {active ? '★ ' : ''}{node.name}
+                          {active ? '★ ' : ''}
+                          {node.name}
                         </strong>
                         <span style={{ fontSize: 11, color: active ? '#d8b4fe' : '#94a3b8' }}>
                           {node.desc}
@@ -1763,9 +1374,11 @@ export default function App() {
             </div>
           )}
 
-          {/* %100 Otomatik Dengelenen Kaydırmalı (Slider) Stat Ağırlık Ayar Paneli */}
+          {/* Stat Paylaşımı Çekmecesi */}
           {isWeightDrawerOpen && (
             <div
+              role="dialog"
+              aria-label="Stat Paylaşımı"
               style={{
                 position: 'absolute',
                 top: 12,
@@ -1786,9 +1399,7 @@ export default function App() {
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <strong style={{ fontSize: 13, color: '#38bdf8' }}>
-                    Stat Paylaşımı
-                  </strong>
+                  <strong style={{ fontSize: 13, color: '#38bdf8' }}>Stat Paylaşımı</strong>
                   <span
                     style={{
                       fontSize: 11,
@@ -1822,6 +1433,7 @@ export default function App() {
                     </button>
                   )}
                   <button
+                    aria-label="Kapat"
                     onClick={() => setIsWeightDrawerOpen(false)}
                     style={{
                       background: 'transparent',
@@ -1834,59 +1446,6 @@ export default function App() {
                     ✕
                   </button>
                 </div>
-              </div>
-
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-                {[
-                  {
-                    label: '⚡ Lightning + Crit',
-                    items: [
-                      { stat: 'Lightning Damage', weight: 60 },
-                      { stat: 'Critical', weight: 25 },
-                      { stat: 'Energy Shield', weight: 15 },
-                    ],
-                  },
-                  {
-                    label: '🔥 Fire + Armour + Life',
-                    items: [
-                      { stat: 'Fire Damage', weight: 55 },
-                      { stat: 'Armour', weight: 25 },
-                      { stat: 'Maximum Life', weight: 20 },
-                    ],
-                  },
-                  {
-                    label: '❄ Cold + Cast Speed',
-                    items: [
-                      { stat: 'Cold Damage', weight: 55 },
-                      { stat: 'Critical', weight: 25 },
-                      { stat: 'Cast Speed', weight: 20 },
-                    ],
-                  },
-                  {
-                    label: '💀 Minion + ES',
-                    items: [
-                      { stat: 'Minion', weight: 65 },
-                      { stat: 'Energy Shield', weight: 20 },
-                      { stat: 'Maximum Life', weight: 15 },
-                    ],
-                  },
-                ].map((preset) => (
-                  <button
-                    key={preset.label}
-                    onClick={() => setStatWeights(normalizeToHundred(preset.items))}
-                    style={{
-                      background: '#1e293b',
-                      color: '#cbd5e1',
-                      border: '1px solid #334155',
-                      borderRadius: 4,
-                      padding: '3px 7px',
-                      fontSize: 11,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    {preset.label}
-                  </button>
-                ))}
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -1911,6 +1470,7 @@ export default function App() {
                           %{item.weight}
                         </strong>
                         <button
+                          aria-label={`${item.stat} kaldır`}
                           onClick={() => removeStatWeight(item.stat)}
                           style={{
                             background: 'transparent',
@@ -1992,7 +1552,7 @@ export default function App() {
             </div>
           )}
 
-          {/* Harita Üzerinde Yüzen Düğüm / Keystone Arama Çubuğu */}
+          {/* Harita Üzerinde Arama Çubuğu */}
           <div
             style={{
               position: 'absolute',
@@ -2010,15 +1570,22 @@ export default function App() {
             }}
           >
             <input
+              aria-label="Ağaçta düğüm ara"
               value={nodeSearchQuery}
               onChange={(e) => setNodeSearchQuery(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') {
                   e.preventDefault();
-                  focusNextMatch();
+                  if (matchedNodeIds.length > 0) {
+                    setFocusTrigger((prev) => ({
+                      nodeId: matchedNodeIds[focusIndex],
+                      seq: (prev?.seq || 0) + 1,
+                    }));
+                    setFocusIndex((prev) => (prev + 1) % matchedNodeIds.length);
+                  }
                 }
               }}
-              placeholder="Ağaçta düğüm / Keystone ara (ör: Chaos, Spirit)..."
+              placeholder="Ağaçta düğüm / Keystone ara (Enter ile odaklan)..."
               style={{
                 background: 'transparent',
                 border: 'none',
@@ -2053,6 +1620,7 @@ export default function App() {
                   </button>
                 )}
                 <button
+                  aria-label="Aramayı temizle"
                   onClick={() => setNodeSearchQuery('')}
                   style={{
                     background: 'transparent',
@@ -2071,14 +1639,52 @@ export default function App() {
           <SkillTreeCanvas
             nodes={nodes}
             spriteSheets={spriteSheets}
+            startNodeId={selectedStartId}
+            maxPoints={LIMITS.maxPoints.max}
             allocatedIds={allocatedIds}
             highlightedIds={matchedNodeIds}
             focusTrigger={focusTrigger}
             selectedClass={selectedBaseClassName}
             selectedAscendancy={activeAscendancy?.name || ''}
             onToggleNode={handleToggleNode}
-            onSetAllocatedIds={setAllocatedIds}
+            onSetAllocatedIds={handleSetAllocatedIds}
+            onBudgetExceeded={(_, max) =>
+              showNotice(`Maksimum ${max} pasif puan sınırına ulaşıldı.`, 'error')
+            }
           />
+
+          {toast && (
+            <div
+              role="status"
+              aria-live="polite"
+              style={{
+                position: 'absolute',
+                bottom: 16,
+                right: 16,
+                zIndex: 40,
+                background:
+                  toast.tone === 'error'
+                    ? '#450a0a'
+                    : toast.tone === 'success'
+                    ? '#052e16'
+                    : '#0f172a',
+                border:
+                  toast.tone === 'error'
+                    ? '1px solid #ef4444'
+                    : toast.tone === 'success'
+                    ? '1px solid #22c55e'
+                    : '1px solid #38bdf8',
+                color: '#f8fafc',
+                padding: '9px 14px',
+                borderRadius: 6,
+                fontSize: 12,
+                boxShadow: '0 8px 24px rgba(0,0,0,0.65)',
+                maxWidth: 360,
+              }}
+            >
+              {toast.text}
+            </div>
+          )}
         </div>
 
         {/* Sağ Panel */}
@@ -2092,7 +1698,6 @@ export default function App() {
             overflow: 'hidden',
           }}
         >
-          {/* 3 Sekme Başlığı */}
           <div style={{ display: 'flex', borderBottom: '1px solid #262b36' }}>
             <button
               onClick={() => setRightTab('stats')}
@@ -2144,13 +1749,20 @@ export default function App() {
             </button>
           </div>
 
-          {/* Sekme İçeriği */}
           <div style={{ flex: 1, padding: 16, overflowY: 'auto' }}>
             {rightTab === 'stats' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 {activeAscendancy && (
                   <div
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setIsAscDrawerOpen(true)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setIsAscDrawerOpen(true);
+                      }
+                    }}
                     style={{
                       background: '#1e1035',
                       border: '1px solid #6b21a8',
@@ -2192,26 +1804,26 @@ export default function App() {
                       Savunma (Effective HP)
                     </span>
                     <strong style={{ fontSize: 16, color: '#22c55e' }}>
-                      {combatSummary.effectiveHp.toLocaleString()} EHP
+                      {currentEvaluation.effective_hp.toLocaleString()} EHP
                     </strong>
                   </div>
 
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, fontSize: 12 }}>
                     <div style={{ background: '#161b26', padding: '5px 8px', borderRadius: 4 }}>
                       <span style={{ color: '#94a3b8' }}>Life: </span>
-                      <strong style={{ color: '#f87171' }}>{combatSummary.totalLife}</strong>
+                      <strong style={{ color: '#f87171' }}>{currentEvaluation.total_life}</strong>
                     </div>
                     <div style={{ background: '#161b26', padding: '5px 8px', borderRadius: 4 }}>
                       <span style={{ color: '#94a3b8' }}>ES: </span>
-                      <strong style={{ color: '#38bdf8' }}>{combatSummary.totalEs}</strong>
+                      <strong style={{ color: '#38bdf8' }}>{currentEvaluation.total_es}</strong>
                     </div>
                     <div style={{ background: '#161b26', padding: '5px 8px', borderRadius: 4 }}>
                       <span style={{ color: '#94a3b8' }}>Armour: </span>
-                      <strong style={{ color: '#fbbf24' }}>{combatSummary.totalArmour}</strong>
+                      <strong style={{ color: '#fbbf24' }}>{currentEvaluation.total_armour}</strong>
                     </div>
                     <div style={{ background: '#161b26', padding: '5px 8px', borderRadius: 4 }}>
                       <span style={{ color: '#94a3b8' }}>Evasion: </span>
-                      <strong style={{ color: '#4ade80' }}>{combatSummary.totalEvasion}</strong>
+                      <strong style={{ color: '#4ade80' }}>{currentEvaluation.total_evasion}</strong>
                     </div>
                   </div>
 
@@ -2225,22 +1837,26 @@ export default function App() {
                     }}
                   >
                     <span style={{ color: '#cbd5e1' }}>
-                      Crit Şansı: <strong style={{ color: '#facc15' }}>%{combatSummary.effectiveCritChance}</strong>
+                      Crit Şansı:{' '}
+                      <strong style={{ color: '#facc15' }}>%{currentEvaluation.effective_crit}</strong>
                     </span>
                     <span style={{ color: '#cbd5e1' }}>
-                      Crit Hasarı: <strong style={{ color: '#facc15' }}>+%{combatSummary.totalCritMultPct}</strong>
+                      Crit Hasarı:{' '}
+                      <strong style={{ color: '#facc15' }}>
+                        +%{currentEvaluation.total_crit_mult_pct}
+                      </strong>
                     </span>
                   </div>
                 </div>
 
-                {Object.keys(aggregatedStats.totals).length === 0 &&
-                aggregatedStats.rawLines.length === 0 ? (
+                {Object.keys(currentEvaluation.parsed.totals).length === 0 &&
+                currentEvaluation.parsed.raw_lines.length === 0 ? (
                   <div style={{ fontSize: 13, color: '#64748b' }}>
                     Sınıf seçip <b>En İyi Build'i Çiz</b> butonuna basın veya düğümlere tıklayarak puan verin.
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {Object.entries(aggregatedStats.totals)
+                    {Object.entries(currentEvaluation.parsed.totals)
                       .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
                       .map(([label, val]) => (
                         <div
@@ -2253,14 +1869,14 @@ export default function App() {
                             borderRadius: 4,
                           }}
                         >
-                          <strong style={{ color: '#38bdf8' }}>
+                          <strong style={{ color: val >= 0 ? '#38bdf8' : '#f87171' }}>
                             {val > 0 ? `+${Number(val.toFixed(1))}` : Number(val.toFixed(1))}
                           </strong>{' '}
                           {label}
                         </div>
                       ))}
 
-                    {aggregatedStats.rawLines.map((line, i) => (
+                    {currentEvaluation.parsed.raw_lines.map((line, i) => (
                       <div
                         key={`raw-${i}`}
                         style={{
@@ -2360,20 +1976,11 @@ export default function App() {
                       <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 2 }}>
                         Silah Baz DPS (Max {LIMITS.weaponBaseDps.max.toLocaleString()})
                       </label>
-                      <input
-                        type="number"
+                      <NumberField
                         min={LIMITS.weaponBaseDps.min}
                         max={LIMITS.weaponBaseDps.max}
                         value={weaponBaseDps}
-                        onChange={(e) =>
-                          setWeaponBaseDps(
-                            clampInt(
-                              Number(e.target.value),
-                              LIMITS.weaponBaseDps.min,
-                              LIMITS.weaponBaseDps.max
-                            )
-                          )
-                        }
+                        onChange={setWeaponBaseDps}
                         style={{
                           width: '100%',
                           boxSizing: 'border-box',
@@ -2390,20 +1997,11 @@ export default function App() {
                       <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 2 }}>
                         Gem (1-{LIMITS.baseGemLevel.max})
                       </label>
-                      <input
-                        type="number"
+                      <NumberField
                         min={LIMITS.baseGemLevel.min}
                         max={LIMITS.baseGemLevel.max}
                         value={baseGemLevel}
-                        onChange={(e) =>
-                          setBaseGemLevel(
-                            clampInt(
-                              Number(e.target.value),
-                              LIMITS.baseGemLevel.min,
-                              LIMITS.baseGemLevel.max
-                            )
-                          )
-                        }
+                        onChange={setBaseGemLevel}
                         style={{
                           width: '100%',
                           boxSizing: 'border-box',
@@ -2420,20 +2018,11 @@ export default function App() {
                       <label style={{ fontSize: 11, color: '#38bdf8', display: 'block', marginBottom: 2 }}>
                         +Lvl (0-{LIMITS.bonusSkillLevels.max})
                       </label>
-                      <input
-                        type="number"
+                      <NumberField
                         min={LIMITS.bonusSkillLevels.min}
                         max={LIMITS.bonusSkillLevels.max}
                         value={bonusSkillLevels}
-                        onChange={(e) =>
-                          setBonusSkillLevels(
-                            clampInt(
-                              Number(e.target.value),
-                              LIMITS.bonusSkillLevels.min,
-                              LIMITS.bonusSkillLevels.max
-                            )
-                          )
-                        }
+                        onChange={setBonusSkillLevels}
                         style={{
                           width: '100%',
                           boxSizing: 'border-box',
@@ -2448,17 +2037,22 @@ export default function App() {
                   </div>
 
                   <div style={{ fontSize: 11, color: '#94a3b8', display: 'flex', justifyContent: 'space-between' }}>
-                    <span>Etkin Seviye: <strong style={{ color: '#fff' }}>Lv.{dpsBreakdown.effectiveLevel}</strong></span>
-                    <span style={{ color: '#38bdf8' }}>+{dpsBreakdown.bonusLevelGainPct}% Taban Hasar</span>
+                    <span>
+                      Etkin Seviye:{' '}
+                      <strong style={{ color: '#fff' }}>Lv.{currentEvaluation.effective_level}</strong>
+                    </span>
+                    <span style={{ color: '#38bdf8' }}>
+                      +{currentEvaluation.bonus_level_gain_pct}% Taban Hasar
+                    </span>
                   </div>
                 </div>
 
-                {/* Spirit Bütçesi & Herald / Aura / Meta Gem Yöneticisi */}
+                {/* Spirit Bütçesi */}
                 <div
                   style={{
                     background: '#131824',
                     border:
-                      spiritSummary.remainingSpirit < 0
+                      currentEvaluation.remaining_spirit < 0
                         ? '1px solid #ef4444'
                         : '1px solid #1e293b',
                     padding: 10,
@@ -2475,10 +2069,10 @@ export default function App() {
                     <strong
                       style={{
                         fontSize: 12,
-                        color: spiritSummary.remainingSpirit < 0 ? '#f87171' : '#c084fc',
+                        color: currentEvaluation.remaining_spirit < 0 ? '#f87171' : '#c084fc',
                       }}
                     >
-                      {spiritSummary.usedSpirit} / {spiritSummary.maxSpirit} Spirit
+                      {currentEvaluation.used_spirit} / {currentEvaluation.max_spirit} Spirit
                     </strong>
                   </div>
 
@@ -2496,7 +2090,7 @@ export default function App() {
                         width: `${spiritUsageRatio}%`,
                         height: '100%',
                         background:
-                          spiritSummary.remainingSpirit < 0 ? '#ef4444' : '#a855f7',
+                          currentEvaluation.remaining_spirit < 0 ? '#ef4444' : '#a855f7',
                         transition: 'width 0.2s ease',
                       }}
                     />
@@ -2504,22 +2098,13 @@ export default function App() {
 
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 11 }}>
                     <span style={{ color: '#94a3b8' }}>
-                      100 Görev + {spiritSummary.treeSpirit} Ağaç/Asc + Ekipman:
+                      100 Görev + {currentEvaluation.tree_and_asc_spirit} Ağaç/Asc + Ekipman:
                     </span>
-                    <input
-                      type="number"
+                    <NumberField
                       min={LIMITS.gearSpirit.min}
                       max={LIMITS.gearSpirit.max}
                       value={gearSpirit}
-                      onChange={(e) =>
-                        setGearSpirit(
-                          clampInt(
-                            Number(e.target.value),
-                            LIMITS.gearSpirit.min,
-                            LIMITS.gearSpirit.max
-                          )
-                        )
-                      }
+                      onChange={setGearSpirit}
                       style={{
                         width: 64,
                         background: '#1e2430',
@@ -2532,9 +2117,9 @@ export default function App() {
                     />
                   </div>
 
-                  {spiritSummary.remainingSpirit < 0 && (
+                  {currentEvaluation.remaining_spirit < 0 && (
                     <div style={{ fontSize: 11, color: '#f87171', fontWeight: 'bold' }}>
-                      ⚠ Spirit kapasitesi {Math.abs(spiritSummary.remainingSpirit)} puan aşıldı!
+                      ⚠ Spirit kapasitesi {Math.abs(currentEvaluation.remaining_spirit)} puan aşıldı!
                     </div>
                   )}
 
@@ -2553,7 +2138,16 @@ export default function App() {
                       return (
                         <div
                           key={buff.id}
+                          role="checkbox"
+                          aria-checked={active}
+                          tabIndex={0}
                           onClick={() => toggleSpiritBuff(buff.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              toggleSpiritBuff(buff.id);
+                            }
+                          }}
                           style={{
                             display: 'flex',
                             justifyContent: 'space-between',
@@ -2567,7 +2161,8 @@ export default function App() {
                         >
                           <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <span style={{ fontSize: 12, fontWeight: 'bold', color: active ? '#f3e8ff' : '#cbd5e1' }}>
-                              {active ? '✓ ' : ''}{buff.name}
+                              {active ? '✓ ' : ''}
+                              {buff.name}
                             </span>
                             <span style={{ fontSize: 10, color: active ? '#d8b4fe' : '#64748b' }}>
                               {buff.effectLabel}
@@ -2591,7 +2186,7 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Crit & Support & Spirit & Ascendancy Dahil Toplam DPS Özeti */}
+                {/* Toplam DPS Özeti */}
                 <div
                   style={{
                     background: 'linear-gradient(135deg, #161b26 0%, #1e293b 100%)',
@@ -2606,16 +2201,20 @@ export default function App() {
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: 12, color: '#cbd5e1' }}>Toplam DPS:</span>
                     <strong style={{ color: '#f59e0b', fontSize: 18 }}>
-                      {dpsBreakdown.finalDps.toLocaleString()} DPS
+                      {currentEvaluation.est_dps.toLocaleString()} DPS
                     </strong>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: '#94a3b8' }}>
-                    <span>
-                      Crit: %{combatSummary.effectiveCritChance}
+                    <span>Crit: %{currentEvaluation.effective_crit}</span>
+                    <span style={{ color: '#22c55e' }}>
+                      {currentEvaluation.support_count} Support: +{currentEvaluation.support_more_pct}%
                     </span>
-                    <span style={{ color: '#22c55e' }}>6-Link: +{dpsBreakdown.supportMorePct}%</span>
-                    <span style={{ color: '#c084fc' }}>Spirit: +{dpsBreakdown.spiritMorePct}%</span>
-                    <span style={{ color: '#f472b6' }}>Asc: +{dpsBreakdown.ascMorePct}%</span>
+                    <span style={{ color: '#c084fc' }}>
+                      Spirit: +{currentEvaluation.spirit_more_pct}%
+                    </span>
+                    <span style={{ color: '#f472b6' }}>
+                      Asc: +{currentEvaluation.asc_more_pct}%
+                    </span>
                   </div>
                 </div>
 
@@ -2685,7 +2284,6 @@ export default function App() {
 
             {rightTab === 'builds' && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                {/* İki Build Arası Kıyaslama (Compare / Diff) Paneli */}
                 {savedBuilds.length >= 1 && (
                   <div
                     style={{
@@ -2746,7 +2344,7 @@ export default function App() {
                       </select>
                     </div>
 
-                    {comparisonData && (
+                    {comparisonResults && (
                       <>
                         <div
                           style={{
@@ -2765,37 +2363,37 @@ export default function App() {
                           <span style={{ color: '#f59e0b', fontWeight: 'bold' }}>Fark (A-B)</span>
 
                           <span style={{ color: '#cbd5e1' }}>Tahmini DPS</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.left.estDps.toLocaleString()}</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.right.estDps.toLocaleString()}</span>
-                          {renderDiffBadge(comparisonData.left.estDps - comparisonData.right.estDps)}
+                          <span style={{ color: '#fff' }}>{comparisonResults.left.est_dps.toLocaleString()}</span>
+                          <span style={{ color: '#fff' }}>{comparisonResults.right.est_dps.toLocaleString()}</span>
+                          {renderDiffBadge(comparisonResults.left.est_dps - comparisonResults.right.est_dps)}
 
                           <span style={{ color: '#cbd5e1' }}>EHP</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.left.effectiveHp.toLocaleString()}</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.right.effectiveHp.toLocaleString()}</span>
-                          {renderDiffBadge(comparisonData.left.effectiveHp - comparisonData.right.effectiveHp)}
+                          <span style={{ color: '#fff' }}>{comparisonResults.left.effective_hp.toLocaleString()}</span>
+                          <span style={{ color: '#fff' }}>{comparisonResults.right.effective_hp.toLocaleString()}</span>
+                          {renderDiffBadge(comparisonResults.left.effective_hp - comparisonResults.right.effective_hp)}
 
                           <span style={{ color: '#cbd5e1' }}>Life</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.left.totalLife}</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.right.totalLife}</span>
-                          {renderDiffBadge(comparisonData.left.totalLife - comparisonData.right.totalLife)}
+                          <span style={{ color: '#fff' }}>{comparisonResults.left.total_life}</span>
+                          <span style={{ color: '#fff' }}>{comparisonResults.right.total_life}</span>
+                          {renderDiffBadge(comparisonResults.left.total_life - comparisonResults.right.total_life)}
 
                           <span style={{ color: '#cbd5e1' }}>Energy Shield</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.left.totalEs}</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.right.totalEs}</span>
-                          {renderDiffBadge(comparisonData.left.totalEs - comparisonData.right.totalEs)}
+                          <span style={{ color: '#fff' }}>{comparisonResults.left.total_es}</span>
+                          <span style={{ color: '#fff' }}>{comparisonResults.right.total_es}</span>
+                          {renderDiffBadge(comparisonResults.left.total_es - comparisonResults.right.total_es)}
 
                           <span style={{ color: '#cbd5e1' }}>Crit Şansı</span>
-                          <span style={{ color: '#fff' }}>%{comparisonData.left.effectiveCrit}</span>
-                          <span style={{ color: '#fff' }}>%{comparisonData.right.effectiveCrit}</span>
+                          <span style={{ color: '#fff' }}>%{comparisonResults.left.effective_crit}</span>
+                          <span style={{ color: '#fff' }}>%{comparisonResults.right.effective_crit}</span>
                           {renderDiffBadge(
-                            Number((comparisonData.left.effectiveCrit - comparisonData.right.effectiveCrit).toFixed(1)),
+                            Number((comparisonResults.left.effective_crit - comparisonResults.right.effective_crit).toFixed(1)),
                             '%'
                           )}
 
                           <span style={{ color: '#cbd5e1' }}>Spirit Kap.</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.left.maxSpirit}</span>
-                          <span style={{ color: '#fff' }}>{comparisonData.right.maxSpirit}</span>
-                          {renderDiffBadge(comparisonData.left.maxSpirit - comparisonData.right.maxSpirit)}
+                          <span style={{ color: '#fff' }}>{comparisonResults.left.max_spirit}</span>
+                          <span style={{ color: '#fff' }}>{comparisonResults.right.max_spirit}</span>
+                          {renderDiffBadge(comparisonResults.left.max_spirit - comparisonResults.right.max_spirit)}
                         </div>
 
                         <div
@@ -2807,9 +2405,9 @@ export default function App() {
                             paddingTop: 2,
                           }}
                         >
-                          <span>Ortak Düğüm: <strong style={{ color: '#22c55e' }}>{comparisonData.sharedNodes}</strong></span>
-                          <span>Sadece A: <strong style={{ color: '#38bdf8' }}>{comparisonData.onlyLeftNodes}</strong></span>
-                          <span>Sadece B: <strong style={{ color: '#c084fc' }}>{comparisonData.onlyRightNodes}</strong></span>
+                          <span>Ortak Düğüm: <strong style={{ color: '#22c55e' }}>{comparisonResults.sharedNodes}</strong></span>
+                          <span>Sadece A: <strong style={{ color: '#38bdf8' }}>{comparisonResults.onlyLeftNodes}</strong></span>
+                          <span>Sadece B: <strong style={{ color: '#c084fc' }}>{comparisonResults.onlyRightNodes}</strong></span>
                         </div>
                       </>
                     )}
@@ -2976,9 +2574,12 @@ export default function App() {
                             Yükle
                           </button>
                           <button
-                            onClick={() =>
-                              persistBuilds(savedBuilds.filter((item) => item.id !== b.id))
-                            }
+                            onClick={() => {
+                              if (window.confirm(`"${b.name}" build'i silinsin mi?`)) {
+                                persistBuilds(savedBuilds.filter((item) => item.id !== b.id));
+                                showNotice(`"${b.name}" silindi.`, 'info');
+                              }
+                            }}
                             style={{
                               background: '#1e293b',
                               color: '#f87171',

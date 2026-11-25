@@ -1,138 +1,32 @@
 pub mod models;
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use image::ImageFormat;
-use mlua::Lua;
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use models::{ClassStart, GameDatabase, GemData, PassiveNode, PassiveTree, SpriteRect};
 use reqwest::Client;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::f32::consts::PI;
 use std::fs;
-use std::io::Cursor;
-use std::path::PathBuf;
-
-const REPO_META_URL: &str = "https://api.github.com/repos/PathOfBuildingCommunity/PathOfBuilding-PoE2";
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
 pub struct DataUpdater {
-    client: Client,
     data_dir: PathBuf,
+    client: Client,
 }
 
 impl DataUpdater {
     pub fn new(app_data_dir: PathBuf) -> Self {
         let client = Client::builder()
-            .user_agent("PoE2-Theorycrafter-Builder")
+            .user_agent("PoE2-Theorycrafter/0.1")
             .build()
-            .expect("HTTP client oluşturulamadı");
+            .unwrap_or_else(|_| Client::new());
 
         Self {
-            client,
             data_dir: app_data_dir,
+            client,
         }
-    }
-
-    async fn fetch_repo_info(&self) -> Result<(String, String)> {
-        let meta: Value = self
-            .client
-            .get(REPO_META_URL)
-            .send()
-            .await?
-            .error_for_status()
-            .context("GitHub depo bilgisi alınamadı")?
-            .json()
-            .await?;
-
-        let branch = meta["default_branch"]
-            .as_str()
-            .unwrap_or("dev")
-            .to_string();
-
-        let commit_url = format!("{}/commits/{}", REPO_META_URL, branch);
-        let commit_resp: Value = self
-            .client
-            .get(&commit_url)
-            .send()
-            .await?
-            .error_for_status()
-            .context("Son commit bilgisi alınamadı")?
-            .json()
-            .await?;
-
-        let sha = commit_resp["sha"]
-            .as_str()
-            .context("Commit SHA bulunamadı")?
-            .to_string();
-
-        Ok((branch, sha))
-    }
-
-    async fn detect_latest_tree_folder(&self, branch: &str) -> Result<String> {
-        let url = format!("{}/contents/src/TreeData?ref={}", REPO_META_URL, branch);
-        let items: Vec<Value> = self
-            .client
-            .get(&url)
-            .send()
-            .await?
-            .error_for_status()
-            .context("TreeData klasör listesi alınamadı")?
-            .json()
-            .await?;
-
-        let mut folders: Vec<String> = items
-            .into_iter()
-            .filter(|item| item["type"].as_str() == Some("dir"))
-            .filter_map(|item| item["name"].as_str().map(String::from))
-            .filter(|name| name.chars().next().map_or(false, |c| c.is_ascii_digit()))
-            .collect();
-
-        folders.sort();
-        folders
-            .pop()
-            .context("TreeData altında geçerli bir sürüm klasörü bulunamadı")
-    }
-
-    async fn fetch_sprite_as_png_data_url(
-        &self,
-        raw_base: &str,
-        folder: &str,
-        filename: &str,
-    ) -> Option<String> {
-        let clean_name = filename
-            .split('?')
-            .next()
-            .unwrap_or(filename)
-            .trim_start_matches('/');
-
-        let candidates = [
-            format!("{}/src/TreeData/{}/{}", raw_base, folder, clean_name),
-            format!("{}/src/{}", raw_base, clean_name),
-            format!("{}/{}", raw_base, clean_name),
-        ];
-
-        for url in &candidates {
-            if let Ok(resp) = self.client.get(url).send().await {
-                if resp.status().is_success() {
-                    if let Ok(bytes) = resp.bytes().await {
-                        if clean_name.to_lowercase().ends_with(".png") {
-                            return Some(format!("data:image/png;base64,{}", BASE64.encode(&bytes)));
-                        }
-                        if let Ok(img) = image::load_from_memory_with_format(&bytes, ImageFormat::Dds)
-                            .or_else(|_| image::load_from_memory(&bytes))
-                        {
-                            let mut png_buf = Cursor::new(Vec::new());
-                            if img.write_to(&mut png_buf, ImageFormat::Png).is_ok() {
-                                return Some(format!(
-                                    "data:image/png;base64,{}",
-                                    BASE64.encode(png_buf.into_inner())
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
     }
 
     pub async fn sync_game_data(&self, force: bool) -> Result<GameDatabase> {
@@ -141,11 +35,19 @@ impl DataUpdater {
         let (branch, latest_hash) = self.fetch_repo_info().await?;
 
         if !force && bin_path.exists() {
-            if let Ok(bytes) = fs::read(&bin_path) {
-                if let Ok(db) = bincode::deserialize::<GameDatabase>(&bytes) {
-                    if db.version_hash == latest_hash && !db.tree.classes.is_empty() {
+            match fs::read(&bin_path) {
+                Ok(bytes) => match bincode::deserialize::<GameDatabase>(&bytes) {
+                    Ok(db) if db.version_hash == latest_hash && !db.tree.classes.is_empty() => {
                         return Ok(db);
                     }
+                    Ok(_) => {}
+                    Err(e) => {
+                        eprintln!("Bozuk game_data.bin tespit edildi, yeniden indiriliyor: {e}");
+                        let _ = fs::remove_file(&bin_path);
+                    }
+                },
+                Err(e) => {
+                    eprintln!("game_data.bin okunamadı: {e}");
                 }
             }
         }
@@ -188,16 +90,21 @@ impl DataUpdater {
         tree.sprite_sheets = sprite_sheets;
 
         let gems_url = format!("{}/src/Data/Gems.lua", raw_base);
-        let gems = match self.client.get(&gems_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                if let Ok(lua_code) = resp.text().await {
-                    self.parse_gems_lua(&lua_code).unwrap_or_default()
-                } else {
-                    HashMap::new()
-                }
-            }
-            _ => HashMap::new(),
-        };
+        let lua_code = self
+            .client
+            .get(&gems_url)
+            .send()
+            .await
+            .context("Gems.lua isteği başarısız")?
+            .error_for_status()
+            .context("Gems.lua HTTP hatası")?
+            .text()
+            .await
+            .context("Gems.lua metni okunamadı")?;
+
+        let gems = self
+            .parse_gems_lua(&lua_code)
+            .context("Gems.lua ayrıştırılamadı")?;
 
         let db = GameDatabase {
             version_hash: latest_hash,
@@ -206,304 +113,344 @@ impl DataUpdater {
         };
 
         let encoded = bincode::serialize(&db)?;
-        fs::write(&bin_path, encoded)?;
+        atomic_write(&bin_path, &encoded)?;
 
         Ok(db)
     }
 
-    fn build_icon_lookup(raw: &Value) -> HashMap<String, SpriteRect> {
-        let mut lookup = HashMap::new();
-        let Some(sprites_obj) = raw["sprites"].as_object() else {
-            return lookup;
-        };
+    async fn fetch_repo_info(&self) -> Result<(String, String)> {
+        let repo_url =
+            "https://api.github.com/repos/PathOfBuildingCommunity/PathOfBuilding-PoE2";
+        let repo_json: Value = self
+            .client
+            .get(repo_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
 
-        let preferred_groups = [
-            "normalActive",
-            "notableActive",
-            "keystoneActive",
-            "normalInactive",
-            "notableInactive",
-            "keystoneInactive",
-            "mastery",
-        ];
+        let branch = repo_json["default_branch"]
+            .as_str()
+            .unwrap_or("dev")
+            .to_string();
 
-        let mut ordered_keys: Vec<&String> = sprites_obj.keys().collect();
-        ordered_keys.sort_by_key(|k| {
-            preferred_groups
-                .iter()
-                .position(|&p| p == k.as_str())
-                .unwrap_or(99)
-        });
+        let commit_url = format!("{}/commits/{}", repo_url, branch);
+        let commit_json: Value = self
+            .client
+            .get(&commit_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
 
-        for group_key in ordered_keys {
-            let Some(group_val) = sprites_obj.get(group_key) else { continue };
-            let zoom_levels = ["0.3835", "0.2972", "0.2109", "0.1246", "1"];
-            let sheet_entry = zoom_levels
-                .iter()
-                .find_map(|z| group_val.get(*z))
-                .or_else(|| group_val.as_object().and_then(|o| o.values().next()));
+        let sha = commit_json["sha"]
+            .as_str()
+            .unwrap_or("unknown")
+            .to_string();
 
-            let Some(sheet) = sheet_entry else { continue };
-            let Some(filename) = sheet["filename"].as_str() else { continue };
-            let Some(coords) = sheet["coords"].as_object() else { continue };
+        Ok((branch, sha))
+    }
 
-            for (icon_path, rect_val) in coords {
-                if lookup.contains_key(icon_path) {
+    async fn detect_latest_tree_folder(&self, branch: &str) -> Result<String> {
+        let dir_url = format!(
+            "https://api.github.com/repos/PathOfBuildingCommunity/PathOfBuilding-PoE2/contents/src/TreeData?ref={}",
+            branch
+        );
+        let entries: Value = self
+            .client
+            .get(&dir_url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let mut folders: Vec<String> = entries
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|e| e["type"].as_str() == Some("dir"))
+                    .filter_map(|e| e["name"].as_str().map(|s| s.to_string()))
+                    .filter(|name| name.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        folders.sort();
+        Ok(folders.pop().unwrap_or_else(|| "0_1".to_string()))
+    }
+
+    async fn fetch_sprite_as_png_data_url(
+        &self,
+        raw_base: &str,
+        folder: &str,
+        filename: &str,
+    ) -> Option<String> {
+        let clean = filename.trim_start_matches('/');
+        let url = format!("{}/src/TreeData/{}/{}", raw_base, folder, clean);
+        let bytes = self.client.get(&url).send().await.ok()?.bytes().await.ok()?;
+        let img = image::load_from_memory(&bytes).ok()?;
+        let mut png_buf = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png_buf), image::ImageFormat::Png)
+            .ok()?;
+        Some(format!("data:image/png;base64,{}", BASE64.encode(&png_buf)))
+    }
+
+    fn parse_passive_tree(&self, raw: &Value) -> Result<PassiveTree> {
+        let raw_nodes = raw["nodes"]
+            .as_object()
+            .context("tree.json içinde 'nodes' bulunamadı")?;
+
+        // 1. Doğrudan `groups[i].nodes` listesinden `node_id -> (gx, gy)` ters haritası kur
+        // (0-tabanlı / 1-tabanlı dizi indeks kaymasını kesin olarak önler)
+        let mut node_group_coords: HashMap<u32, (f32, f32)> = HashMap::new();
+        if let Some(groups_arr) = raw["groups"].as_array() {
+            for g in groups_arr {
+                if g.is_null() {
                     continue;
                 }
-                let x = rect_val["x"].as_u64().unwrap_or(0) as u32;
-                let y = rect_val["y"].as_u64().unwrap_or(0) as u32;
-                let w = rect_val["w"].as_u64().unwrap_or(0) as u32;
-                let h = rect_val["h"].as_u64().unwrap_or(0) as u32;
-
-                if w > 0 && h > 0 {
-                    lookup.insert(
-                        icon_path.clone(),
-                        SpriteRect {
-                            filename: filename.to_string(),
-                            x,
-                            y,
-                            w,
-                            h,
-                        },
-                    );
+                let gx = g["x"].as_f64().unwrap_or(0.0) as f32;
+                let gy = g["y"].as_f64().unwrap_or(0.0) as f32;
+                if let Some(g_nodes) = g["nodes"].as_array() {
+                    for nid_val in g_nodes {
+                        if let Some(nid) = nid_val
+                            .as_u64()
+                            .map(|v| v as u32)
+                            .or_else(|| nid_val.as_str().and_then(|s| s.parse::<u32>().ok()))
+                        {
+                            node_group_coords.insert(nid, (gx, gy));
+                        }
+                    }
                 }
             }
         }
 
-        lookup
-    }
-
-    fn parse_passive_tree(&self, raw: &Value) -> Result<PassiveTree> {
-        let mut nodes = HashMap::new();
-        let mut adjacency: HashMap<u32, HashSet<u32>> = HashMap::new();
-        let icon_lookup = Self::build_icon_lookup(raw);
-
         let orbit_radii: Vec<f32> = raw["constants"]["orbitRadii"]
             .as_array()
-            .map(|arr| arr.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect())
-            .unwrap_or_else(|| vec![0.0, 82.0, 162.0, 335.0, 493.0, 662.0, 846.0]);
+            .map(|arr| {
+                arr.iter()
+                    .map(|v| v.as_f64().unwrap_or(0.0) as f32)
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                vec![
+                    0.0, 82.0, 162.0, 335.0, 493.0, 662.0, 846.0, 251.0, 1080.0, 1322.0,
+                ]
+            });
 
         let skills_per_orbit: Vec<usize> = raw["constants"]["skillsPerOrbit"]
             .as_array()
-            .map(|arr| arr.iter().map(|v| v.as_u64().unwrap_or(1) as usize).collect())
-            .unwrap_or_else(|| vec![1, 6, 16, 16, 40, 72, 72]);
+            .map(|arr| {
+                arr.iter()
+                    .map(|v| v.as_u64().unwrap_or(1) as usize)
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![1, 12, 24, 24, 72, 72, 72, 24, 72, 144]);
 
         let orbit_angles: Vec<Vec<f32>> = raw["constants"]["orbitAnglesByOrbit"]
             .as_array()
-            .map(|orbits| {
-                orbits
-                    .iter()
-                    .map(|angles| {
-                        angles
-                            .as_array()
-                            .map(|a| a.iter().map(|v| v.as_f64().unwrap_or(0.0) as f32).collect())
+            .map(|arr| {
+                arr.iter()
+                    .map(|sub| {
+                        sub.as_array()
+                            .map(|angles| {
+                                angles
+                                    .iter()
+                                    .map(|a| a.as_f64().unwrap_or(0.0) as f32)
+                                    .collect()
+                            })
                             .unwrap_or_default()
                     })
                     .collect()
             })
             .unwrap_or_default();
 
-        let extract_id = |val: &Value| -> Option<u32> {
-            val.as_u64()
-                .map(|n| n as u32)
-                .or_else(|| val.as_str().and_then(|s| s.parse().ok()))
-                .or_else(|| {
-                    val.get("id").and_then(|v| {
-                        v.as_u64()
-                            .map(|n| n as u32)
-                            .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-                    })
-                })
-        };
+        let mut sprite_lookup: HashMap<String, SpriteRect> = HashMap::new();
+        if let Some(sprites_obj) = raw["sprites"].as_object() {
+            for (_sheet_type, zoom_levels) in sprites_obj {
+                let target_zoom = zoom_levels
+                    .get("0.3835")
+                    .or_else(|| zoom_levels.as_object().and_then(|m| m.values().next()));
 
-        if let Some(raw_nodes) = raw["nodes"].as_object() {
-            for (id_str, node_val) in raw_nodes {
-                let Ok(id) = id_str.parse::<u32>() else { continue };
-
-                for field in ["out", "in", "connections"] {
-                    if let Some(arr) = node_val[field].as_array() {
-                        for item in arr {
-                            if let Some(tid) = extract_id(item) {
-                                if tid != id {
-                                    adjacency.entry(id).or_default().insert(tid);
-                                    adjacency.entry(tid).or_default().insert(id);
-                                }
-                            }
-                        }
-                    } else if let Some(obj) = node_val[field].as_object() {
-                        for (k, item) in obj {
-                            if let Some(tid) = k.parse::<u32>().ok().or_else(|| extract_id(item)) {
-                                if tid != id {
-                                    adjacency.entry(id).or_default().insert(tid);
-                                    adjacency.entry(tid).or_default().insert(id);
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if node_val["isMastery"].as_bool().unwrap_or(false)
-                    || node_val["isProxy"].as_bool().unwrap_or(false)
-                {
-                    continue;
-                }
-
-                let grp_key = node_val["group"]
-                    .as_u64()
-                    .map(|n| n.to_string())
-                    .or_else(|| node_val["group"].as_str().map(String::from));
-
-                let mut x = node_val["x"].as_f64().unwrap_or(0.0) as f32;
-                let mut y = node_val["y"].as_f64().unwrap_or(0.0) as f32;
-
-                if let Some(ref key) = grp_key {
-                    let grp_opt = raw["groups"].get(key).or_else(|| {
-                        key.parse::<usize>()
-                            .ok()
-                            .and_then(|idx| raw["groups"].get(idx))
-                    });
-
-                    if let Some(grp) = grp_opt {
-                        let gx = grp["x"].as_f64().unwrap_or(0.0) as f32;
-                        let gy = grp["y"].as_f64().unwrap_or(0.0) as f32;
-                        let orbit = node_val["orbit"]
-                            .as_u64()
-                            .or_else(|| node_val["orbit"].as_str().and_then(|s| s.parse().ok()))
-                            .unwrap_or(0) as usize;
-                        let orbit_idx = node_val["orbitIndex"]
-                            .as_u64()
-                            .or_else(|| node_val["orbitIndex"].as_str().and_then(|s| s.parse().ok()))
-                            .unwrap_or(0) as usize;
-
-                        let radius = orbit_radii.get(orbit).copied().unwrap_or(0.0);
-                        let angle = orbit_angles
-                            .get(orbit)
-                            .and_then(|angles| angles.get(orbit_idx))
-                            .copied()
-                            .unwrap_or_else(|| {
-                                let count = skills_per_orbit.get(orbit).copied().unwrap_or(1).max(1);
-                                2.0 * std::f32::consts::PI * (orbit_idx as f32) / (count as f32)
-                            });
-
-                        x = gx + radius * angle.sin();
-                        y = gy - radius * angle.cos();
-                    }
-                }
-
-                if x.abs() < 1.0 && y.abs() < 1.0 {
-                    continue;
-                }
-
-                let name = node_val["name"].as_str().unwrap_or("").to_string();
-                let stats = node_val["stats"]
-                    .as_array()
-                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-                    .unwrap_or_default();
-
-                let icon = node_val["icon"]
-                    .as_str()
-                    .and_then(|path| icon_lookup.get(path).cloned());
-
-                nodes.insert(
-                    id,
-                    PassiveNode {
-                        id,
-                        name,
-                        stats,
-                        is_keystone: node_val["isKeystone"].as_bool().unwrap_or(false),
-                        is_notable: node_val["isNotable"].as_bool().unwrap_or(false),
-                        is_attribute_choice: node_val["isAttribute"].as_bool().unwrap_or(false),
-                        x,
-                        y,
-                        neighbors: Vec::new(),
-                        icon,
-                    },
-                );
-            }
-
-            let valid_ids: HashSet<u32> = nodes.keys().copied().collect();
-            for (id, node) in nodes.iter_mut() {
-                if let Some(nbrs) = adjacency.get(id) {
-                    node.neighbors = nbrs
-                        .iter()
-                        .copied()
-                        .filter(|target_id| valid_ids.contains(target_id))
-                        .collect();
-                }
-            }
-        }
-
-        let mut classes = Vec::new();
-        if let Some(raw_nodes) = raw["nodes"].as_object() {
-            for (id_str, node_val) in raw_nodes {
-                let Ok(id) = id_str.parse::<u32>() else { continue };
-                let class_idx_opt = node_val["classStartIndex"].as_u64().or_else(|| {
-                    node_val["classes"]
-                        .as_array()
-                        .and_then(|arr| arr.first())
-                        .and_then(|v| v.as_u64())
-                });
-
-                if let Some(class_idx) = class_idx_opt {
-                    let name = raw["classes"]
-                        .get(class_idx as usize)
-                        .and_then(|c| c["name"].as_str())
-                        .unwrap_or("Class")
+                if let Some(sheet_info) = target_zoom {
+                    let filename = sheet_info["filename"]
+                        .as_str()
+                        .unwrap_or("")
                         .to_string();
-
-                    let start_id = if nodes.get(&id).map_or(false, |n| !n.neighbors.is_empty()) {
-                        Some(id)
-                    } else {
-                        adjacency.get(&id).and_then(|nbrs| {
-                            nbrs.iter()
-                                .copied()
-                                .find(|nid| nodes.get(nid).map_or(false, |n| !n.neighbors.is_empty()))
-                        })
-                    };
-
-                    if let Some(sid) = start_id {
-                        classes.push(ClassStart {
-                            name,
-                            start_node_id: sid,
-                        });
+                    if filename.is_empty() {
+                        continue;
+                    }
+                    if let Some(coords) = sheet_info["coords"].as_object() {
+                        for (icon_key, rect) in coords {
+                            sprite_lookup.insert(
+                                icon_key.clone(),
+                                SpriteRect {
+                                    filename: filename.clone(),
+                                    x: rect["x"].as_u64().unwrap_or(0) as u32,
+                                    y: rect["y"].as_u64().unwrap_or(0) as u32,
+                                    w: rect["w"].as_u64().unwrap_or(0) as u32,
+                                    h: rect["h"].as_u64().unwrap_or(0) as u32,
+                                },
+                            );
+                        }
                     }
                 }
             }
         }
 
-        if classes.is_empty() {
-            let class_angles: [(&str, f32); 6] = [
-                ("Warrior", std::f32::consts::PI * 0.5),
-                ("Mercenary", std::f32::consts::PI * 0.16),
-                ("Ranger", -std::f32::consts::PI * 0.16),
-                ("Monk", -std::f32::consts::PI * 0.5),
-                ("Sorceress", -std::f32::consts::PI * 0.83),
-                ("Witch", std::f32::consts::PI * 0.83),
-            ];
+        // Yalnızca PoE2'nin resmi 6 sınıfını kabul et (Marauder/Duelist/Templar/Shadow kalıntılarını ele)
+        let valid_poe2_classes: HashSet<String> = raw["classes"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|c| c["name"].as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
 
-            for (cname, target_angle) in class_angles {
-                let best = nodes
-                    .values()
-                    .filter(|n| !n.neighbors.is_empty())
-                    .filter(|n| {
-                        let r = (n.x * n.x + n.y * n.y).sqrt();
-                        r > 300.0 && r < 2800.0
-                    })
-                    .min_by(|a, b| {
-                        let ang_a = a.x.atan2(-a.y);
-                        let ang_b = b.x.atan2(-b.y);
-                        let diff_a = (ang_a - target_angle).sin().hypot((ang_a - target_angle).cos() - 1.0);
-                        let diff_b = (ang_b - target_angle).sin().hypot((ang_b - target_angle).cos() - 1.0);
-                        diff_a.partial_cmp(&diff_b).unwrap_or(std::cmp::Ordering::Equal)
-                    });
+        let mut classes: Vec<ClassStart> = Vec::new();
+        let mut class_start_ids: HashSet<u32> = HashSet::new();
+        let mut nodes: HashMap<u32, PassiveNode> = HashMap::new();
+        let mut raw_connections: HashMap<u32, Vec<u32>> = HashMap::new();
 
-                if let Some(node) = best {
-                    classes.push(ClassStart {
-                        name: cname.to_string(),
-                        start_node_id: node.id,
-                    });
+        for (id_str, n) in raw_nodes {
+            let Ok(id) = id_str.parse::<u32>() else {
+                continue;
+            };
+
+            // Ascendancy adalarını ve Ascendancy başlangıç düğümlerini ana ağaçtan ayır
+            if n.get("ascendancyName").and_then(|v| v.as_str()).is_some()
+                || n["isAscendancyStart"].as_bool().unwrap_or(false)
+            {
+                continue;
+            }
+
+            // Mastery hayalet düğümlerini (`isOnlyImage: true`) ana ağaçtan ayır
+            if n["isOnlyImage"].as_bool().unwrap_or(false) {
+                continue;
+            }
+
+            // Grup koordinatı olmayan görünmez root düğümlerini dışla
+            let Some(&(gx, gy)) = node_group_coords.get(&id) else {
+                continue;
+            };
+
+            // Sınıf başlangıç düğümü tespiti (`classesStart: ["Duelist", "Mercenary"]`)
+            if let Some(cs_arr) = n["classesStart"].as_array() {
+                for entry in cs_arr {
+                    if let Some(cname) = entry.as_str() {
+                        if valid_poe2_classes.is_empty() || valid_poe2_classes.contains(cname) {
+                            classes.push(ClassStart {
+                                name: cname.to_string(),
+                                start_node_id: id,
+                            });
+                            class_start_ids.insert(id);
+                        }
+                    }
                 }
+            }
+
+            let orbit = n["orbit"].as_u64().unwrap_or(0) as usize;
+            let orbit_idx = n["orbitIndex"].as_u64().unwrap_or(0) as usize;
+            let radius = orbit_radii.get(orbit).copied().unwrap_or(0.0);
+            let total_in_orbit = skills_per_orbit.get(orbit).copied().unwrap_or(1).max(1);
+
+            let angle = if let Some(custom_angle) = orbit_angles
+                .get(orbit)
+                .and_then(|list| list.get(orbit_idx))
+                .copied()
+            {
+                custom_angle - (PI / 2.0)
+            } else {
+                2.0 * PI * (orbit_idx as f32) / (total_in_orbit as f32) - (PI / 2.0)
+            };
+            let x = gx + radius * angle.cos();
+            let y = gy + radius * angle.sin();
+
+            let name = n["name"].as_str().unwrap_or("").to_string();
+            let stats: Vec<String> = n["stats"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|s| s.as_str().map(|str_val| str_val.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let is_keystone = n["isKeystone"].as_bool().unwrap_or(false);
+            let is_notable = n["isNotable"].as_bool().unwrap_or(false);
+            let is_attribute_choice = n["isMultipleChoiceOption"].as_bool().unwrap_or(false)
+                || n["isMultipleChoice"].as_bool().unwrap_or(false)
+                || n["isAttribute"].as_bool().unwrap_or(false);
+
+            let icon = n["icon"]
+                .as_str()
+                .and_then(|ic| sprite_lookup.get(ic).cloned());
+
+            let mut conns = Vec::new();
+            if let Some(arr) = n["connections"].as_array() {
+                for target in arr {
+                    let tid = target
+                        .as_u64()
+                        .map(|v| v as u32)
+                        .or_else(|| target.as_str().and_then(|s| s.parse::<u32>().ok()))
+                        .or_else(|| target["id"].as_u64().map(|v| v as u32))
+                        .or_else(|| {
+                            target["id"]
+                                .as_str()
+                                .and_then(|s| s.parse::<u32>().ok())
+                        });
+                    if let Some(target_id) = tid {
+                        if target_id != id {
+                            conns.push(target_id);
+                        }
+                    }
+                }
+            }
+            raw_connections.insert(id, conns);
+
+            nodes.insert(
+                id,
+                PassiveNode {
+                    id,
+                    name,
+                    stats,
+                    is_keystone,
+                    is_notable,
+                    is_attribute_choice,
+                    x,
+                    y,
+                    neighbors: Vec::new(),
+                    icon,
+                },
+            );
+        }
+
+        // Yalnızca geçerli ana ağaç düğümleri arasında çift yönlü kenarları kur
+        let mut adjacency: HashMap<u32, HashSet<u32>> = HashMap::new();
+        for (&from_id, targets) in &raw_connections {
+            if !nodes.contains_key(&from_id) {
+                continue;
+            }
+            for &to_id in targets {
+                if !nodes.contains_key(&to_id) {
+                    continue;
+                }
+                if class_start_ids.contains(&from_id) && class_start_ids.contains(&to_id) {
+                    continue;
+                }
+                adjacency.entry(from_id).or_default().insert(to_id);
+                adjacency.entry(to_id).or_default().insert(from_id);
+            }
+        }
+
+        for (id, nbr_set) in adjacency {
+            if let Some(node) = nodes.get_mut(&id) {
+                let mut sorted_nbrs: Vec<u32> = nbr_set.into_iter().collect();
+                sorted_nbrs.sort_unstable();
+                node.neighbors = sorted_nbrs;
             }
         }
 
@@ -516,47 +463,108 @@ impl DataUpdater {
         })
     }
 
-    fn parse_gems_lua(&self, lua_source: &str) -> Result<HashMap<String, GemData>> {
-        let lua = Lua::new();
-        let gems_table: mlua::Table = lua.load(lua_source).eval()?;
+    fn parse_gems_lua(&self, lua_code: &str) -> Result<HashMap<String, GemData>> {
         let mut gems = HashMap::new();
+        let mut current_id: Option<String> = None;
+        let mut current_name = String::new();
+        let mut is_support = false;
+        let mut tags: Vec<String> = Vec::new();
+        let mut spirit_cost: u32 = 0;
+        let mut str_req_weight: f32 = 0.0;
+        let mut dex_req_weight: f32 = 0.0;
+        let mut int_req_weight: f32 = 0.0;
 
-        for pair in gems_table.pairs::<String, mlua::Table>() {
-            let (id, data) = pair?;
-            let name: String = data.get("name").unwrap_or_default();
-            if name.is_empty() {
-                continue;
-            }
+        for raw_line in lua_code.lines() {
+            let line = raw_line.trim();
 
-            let is_support: bool = data.get("support").unwrap_or(false);
-            let spirit_cost: u32 = data.get("spiritCost").unwrap_or(0);
-
-            let mut tags = Vec::new();
-            if let Ok(tags_table) = data.get::<&str, mlua::Table>("tags") {
-                for tag_pair in tags_table.pairs::<String, bool>() {
-                    if let Ok((tag_name, is_active)) = tag_pair {
-                        if is_active {
-                            tags.push(tag_name);
+            if line.starts_with("[\"") && line.contains("\"] = {") {
+                if let Some(id) = current_id.take() {
+                    if !current_name.is_empty() {
+                        gems.insert(
+                            id.clone(),
+                            GemData {
+                                id,
+                                name: current_name.clone(),
+                                is_support,
+                                tags: tags.clone(),
+                                spirit_cost,
+                                str_req_weight,
+                                dex_req_weight,
+                                int_req_weight,
+                            },
+                        );
+                    }
+                }
+                if let Some(end_idx) = line[2..].find("\"]") {
+                    current_id = Some(line[2..2 + end_idx].to_string());
+                    current_name.clear();
+                    is_support = false;
+                    tags.clear();
+                    spirit_cost = 0;
+                    str_req_weight = 0.0;
+                    dex_req_weight = 0.0;
+                    int_req_weight = 0.0;
+                }
+            } else if current_id.is_some() {
+                if let Some(rest) = line.strip_prefix("name = \"") {
+                    if let Some(end_q) = rest.find('"') {
+                        current_name = rest[..end_q].to_string();
+                    }
+                } else if line.starts_with("support = true") {
+                    is_support = true;
+                } else if let Some(rest) = line.strip_prefix("spiritCost = ") {
+                    spirit_cost = rest.trim_end_matches(',').parse::<u32>().unwrap_or(0);
+                } else if let Some(rest) = line.strip_prefix("reqStr = ") {
+                    str_req_weight = rest.trim_end_matches(',').parse::<f32>().unwrap_or(0.0);
+                } else if let Some(rest) = line.strip_prefix("reqDex = ") {
+                    dex_req_weight = rest.trim_end_matches(',').parse::<f32>().unwrap_or(0.0);
+                } else if let Some(rest) = line.strip_prefix("reqInt = ") {
+                    int_req_weight = rest.trim_end_matches(',').parse::<f32>().unwrap_or(0.0);
+                } else if line.starts_with("tags = {") {
+                    let inner = line
+                        .trim_start_matches("tags = {")
+                        .trim_end_matches("},")
+                        .trim_end_matches('}');
+                    for part in inner.split(',') {
+                        let kv: Vec<&str> = part.split('=').collect();
+                        if kv.len() == 2 && kv[1].trim() == "true" {
+                            let tag_name = kv[0].trim().trim_matches('"').to_string();
+                            if !tag_name.is_empty() {
+                                tags.push(tag_name);
+                            }
                         }
                     }
                 }
             }
+        }
 
-            gems.insert(
-                id.clone(),
-                GemData {
-                    id,
-                    name,
-                    is_support,
-                    tags,
-                    spirit_cost,
-                    str_req_weight: data.get("reqStr").unwrap_or(0.0),
-                    dex_req_weight: data.get("reqDex").unwrap_or(0.0),
-                    int_req_weight: data.get("reqInt").unwrap_or(0.0),
-                },
-            );
+        if let Some(id) = current_id {
+            if !current_name.is_empty() {
+                gems.insert(
+                    id.clone(),
+                    GemData {
+                        id,
+                        name: current_name,
+                        is_support,
+                        tags,
+                        spirit_cost,
+                        str_req_weight,
+                        dex_req_weight,
+                        int_req_weight,
+                    },
+                );
+            }
         }
 
         Ok(gems)
     }
+}
+
+fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
+    let tmp_path = target.with_extension("tmp");
+    let mut file = fs::File::create(&tmp_path)?;
+    file.write_all(data)?;
+    file.sync_all()?;
+    fs::rename(&tmp_path, target)?;
+    Ok(())
 }

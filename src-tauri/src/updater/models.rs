@@ -14,13 +14,19 @@ pub struct SpriteRect {
 pub struct PassiveNode {
     pub id: u32,
     pub name: String,
+    #[serde(default)]
     pub stats: Vec<String>,
+    #[serde(default)]
     pub is_keystone: bool,
+    #[serde(default)]
     pub is_notable: bool,
+    #[serde(default)]
     pub is_attribute_choice: bool,
     pub x: f32,
     pub y: f32,
+    #[serde(default)]
     pub neighbors: Vec<u32>,
+    #[serde(default)]
     pub icon: Option<SpriteRect>,
 }
 
@@ -34,6 +40,7 @@ pub struct ClassStart {
 pub struct PassiveTree {
     pub nodes: HashMap<u32, PassiveNode>,
     pub classes: Vec<ClassStart>,
+    #[serde(default)]
     pub sprite_sheets: HashMap<String, String>,
 }
 
@@ -41,11 +48,17 @@ pub struct PassiveTree {
 pub struct GemData {
     pub id: String,
     pub name: String,
+    #[serde(default)]
     pub is_support: bool,
+    #[serde(default)]
     pub tags: Vec<String>,
+    #[serde(default)]
     pub spirit_cost: u32,
+    #[serde(default)]
     pub str_req_weight: f32,
+    #[serde(default)]
     pub dex_req_weight: f32,
+    #[serde(default)]
     pub int_req_weight: f32,
 }
 
