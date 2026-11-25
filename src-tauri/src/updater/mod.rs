@@ -1,3 +1,4 @@
+pub mod dds_atlas;
 pub mod models;
 
 use anyhow::{Context, Result};
@@ -81,7 +82,55 @@ impl DataUpdater {
             .collect();
 
         let mut sprite_sheets = HashMap::new();
-        for fname in needed_files {
+
+        // Yeni biçim: zstd'li BC1 doku dizileri (`*.dds.zst`) -> PNG atlas
+        let (dds_files, legacy_files): (Vec<String>, Vec<String>) = needed_files
+            .into_iter()
+            .partition(|f| f.ends_with(".dds.zst"));
+        for atlas_name in dds_files {
+            let layers: Vec<u32> = tree
+                .nodes
+                .values()
+                .filter_map(|n| n.icon.as_ref())
+                .filter(|ic| ic.filename == atlas_name)
+                .map(|ic| ic.x)
+                .collect();
+            let built = self
+                .fetch_dds_atlas(&raw_base, &latest_folder, &atlas_name, &layers)
+                .await;
+            let sheet_name = atlas_name.replace(".dds.zst", ".png");
+            match built {
+                Ok(atlas) => {
+                    for node in tree.nodes.values_mut() {
+                        let Some(ic) = node.icon.as_ref() else { continue };
+                        if ic.filename != atlas_name {
+                            continue;
+                        }
+                        node.icon = atlas.cells.get(&ic.x).map(|c| SpriteRect {
+                            filename: sheet_name.clone(),
+                            x: c.x,
+                            y: c.y,
+                            w: c.w,
+                            h: c.h,
+                        });
+                    }
+                    sprite_sheets.insert(
+                        sheet_name,
+                        format!("data:image/png;base64,{}", BASE64.encode(&atlas.png)),
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Simge atlası atlandı ({atlas_name}): {e:#}");
+                    for node in tree.nodes.values_mut() {
+                        if node.icon.as_ref().is_some_and(|ic| ic.filename == atlas_name) {
+                            node.icon = None;
+                        }
+                    }
+                }
+            }
+        }
+
+        for fname in legacy_files {
             if let Some(data_url) = self
                 .fetch_sprite_as_png_data_url(&raw_base, &latest_folder, &fname)
                 .await
@@ -187,6 +236,30 @@ impl DataUpdater {
                 .collect::<Vec<u32>>()
         });
         Ok(folders.pop().unwrap_or_else(|| "0_1".to_string()))
+    }
+
+    async fn fetch_dds_atlas(
+        &self,
+        raw_base: &str,
+        folder: &str,
+        atlas_name: &str,
+        layers: &[u32],
+    ) -> Result<dds_atlas::Atlas> {
+        let url = format!("{}/src/TreeData/{}/{}", raw_base, folder, atlas_name);
+        let bytes = self
+            .client
+            .get(&url)
+            .send()
+            .await?
+            .error_for_status()
+            .with_context(|| format!("{} indirilemedi", url))?
+            .bytes()
+            .await?;
+        if bytes.len() > 64 * 1024 * 1024 {
+            anyhow::bail!("{} beklenenden büyük ({} bayt)", atlas_name, bytes.len());
+        }
+        // Hücreler en fazla 64 px: tuval simgeleri zaten ~28-64 px çiziyor
+        dds_atlas::build_atlas(&bytes, layers, 64)
     }
 
     async fn fetch_sprite_as_png_data_url(
@@ -307,6 +380,33 @@ impl DataUpdater {
             }
         }
 
+        // Yeni biçim: `ddsCoords["skills_*.dds.zst"][simge_yolu] = katman (1 tabanlı)`.
+        // Burada yalnızca yer tutucu SpriteRect (x = katman, w = 0) üretilir;
+        // gerçek hücre koordinatları atlas oluşturulunca `sync_game_data` içinde atanır.
+        let mut dds_lookup: HashMap<String, SpriteRect> = HashMap::new();
+        if let Some(dds_obj) = raw["ddsCoords"].as_object() {
+            for (atlas, entries) in dds_obj {
+                if !(atlas.starts_with("skills_") && atlas.ends_with(".dds.zst")) {
+                    continue;
+                }
+                let Some(map) = entries.as_object() else { continue };
+                for (icon_key, layer) in map {
+                    if let Some(l) = layer.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                        dds_lookup.insert(
+                            icon_key.to_lowercase(),
+                            SpriteRect {
+                                filename: atlas.clone(),
+                                x: l,
+                                y: 0,
+                                w: 0,
+                                h: 0,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+
         // Yalnızca PoE2'nin resmi 6 sınıfını kabul et (Marauder/Duelist/Templar/Shadow kalıntılarını ele)
         let valid_poe2_classes: HashSet<String> = raw["classes"]
             .as_array()
@@ -394,7 +494,12 @@ impl DataUpdater {
 
             let icon = n["icon"]
                 .as_str()
-                .and_then(|ic| sprite_lookup.get(ic).cloned());
+                .and_then(|ic| {
+                    sprite_lookup
+                        .get(ic)
+                        .cloned()
+                        .or_else(|| dds_lookup.get(&ic.to_lowercase()).cloned())
+                });
 
             let mut conns = Vec::new();
             if let Some(arr) = n["connections"].as_array() {
