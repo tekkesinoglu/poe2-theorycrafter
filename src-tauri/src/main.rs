@@ -114,6 +114,11 @@ fn optimize_passive_tree(
     weights: HashMap<String, f32>,
     state: State<'_, AppState>,
 ) -> Result<Vec<u32>, String> {
+    // Çok büyük istekler veritabanı kilidini uzun süre tutup diğer komutları bekletir
+    // (gerçek ağaçta 4000+ puan ~24 sn). Oyundaki gerçek puan sınırı çok daha düşük.
+    const MAX_OPTIMIZER_POINTS: usize = 400;
+    let max_points = max_points.min(MAX_OPTIMIZER_POINTS);
+
     let guard = state
         .db
         .lock()
@@ -121,6 +126,10 @@ fn optimize_passive_tree(
     let db = guard
         .as_ref()
         .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())?;
+
+    if !db.tree.nodes.contains_key(&start_node_id) {
+        return Err(format!("Geçersiz başlangıç düğümü: {}", start_node_id));
+    }
 
     Ok(optimize_tree(&db.tree, start_node_id, max_points, &weights))
 }
