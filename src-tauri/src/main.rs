@@ -3,6 +3,7 @@
 use poe2_theorycrafter::engine::stat_parser::{
     evaluate_build_snapshot, BuildEvaluationRequest, BuildEvaluationResult,
 };
+use poe2_theorycrafter::importer::{decode_pob2_code, Pob2Import};
 use poe2_theorycrafter::optimizer::gem_solver::{recommend_supports, SupportRecommendation};
 use poe2_theorycrafter::optimizer::tree_solver::optimize_tree;
 use poe2_theorycrafter::updater::models::{ClassStart, GameDatabase, GemData, PassiveNode};
@@ -106,6 +107,11 @@ async fn trigger_patch_update(
 }
 
 #[tauri::command]
+fn import_pob2_code(code: String) -> Result<Pob2Import, String> {
+    decode_pob2_code(&code)
+}
+
+#[tauri::command]
 fn optimize_passive_tree(
     start_node_id: u32,
     max_points: usize,
@@ -195,6 +201,7 @@ fn main() {
             recommend_support_gems,
             evaluate_build,
             evaluate_builds_batch,
+            import_pob2_code,
         ])
         .run(tauri::generate_context!())
         .expect("Tauri uygulaması başlatılırken hata oluştu");

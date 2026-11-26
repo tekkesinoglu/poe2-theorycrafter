@@ -864,10 +864,65 @@ export default function App() {
     }
   };
 
+  const importPob2Code = async (raw: string) => {
+    if (!raw) {
+      showNotice('Önce bir kod yapıştırın (POE2TC: veya Path of Building 2 kodu).', 'error');
+      return;
+    }
+    try {
+      const r = await invoke<{
+        class_name: string;
+        ascendancy_name: string;
+        level: number;
+        spec_title: string;
+        node_ids: number[];
+      }>('import_pob2_code', { code: raw });
+
+      const cls = classes.find((c) => c.name.toLowerCase() === r.class_name.toLowerCase());
+      const asc = ASCENDANCIES.find(
+        (a) =>
+          a.name.toLowerCase() === r.ascendancy_name.toLowerCase() &&
+          (!cls || a.baseClass.toLowerCase() === cls.name.toLowerCase())
+      );
+      const startId = cls?.start_node_id ?? selectedStartId;
+      const known = r.node_ids.filter((id) => Boolean(nodes[id]));
+      const ignored = r.node_ids.length - known.length;
+      if (known.length === 0) {
+        showNotice('Koddaki düğümlerin hiçbiri bu ağaç sürümünde bulunamadı.', 'error');
+        return;
+      }
+      applyBuildData(
+        {
+          startNodeId: startId,
+          allocatedIds: known.filter((id) => id !== startId),
+          targetStat: '',
+          maxPoints: clampInt(known.length, LIMITS.maxPoints.min, LIMITS.maxPoints.max),
+          selectedSkillId: '',
+          weaponBaseDps: weaponBaseDps,
+          baseGemLevel: baseGemLevel,
+          bonusSkillLevels: bonusSkillLevels,
+          ascendancyId: asc?.id,
+        },
+        `Path of Building 2${r.spec_title ? ` (${r.spec_title})` : ''}`
+      );
+      if (ignored > 0) {
+        showNotice(
+          `PoB2 build'i yüklendi: ${known.length} düğüm. ${ignored} düğüm atlandı (ascendancy/farklı ağaç sürümü).`,
+          'info'
+        );
+      }
+    } catch (e) {
+      showNotice(
+        typeof e === 'string' ? e : 'Kod tanınmadı: POE2TC: veya Path of Building 2 kodu girin.',
+        'error'
+      );
+    }
+  };
+
   const importShareCode = () => {
     const raw = shareCodeInput.trim();
     if (!raw.startsWith('POE2TC:')) {
-      showNotice('Geçersiz kod! Kod "POE2TC:" ile başlamalıdır.', 'error');
+      void importPob2Code(raw);
       return;
     }
     try {
@@ -2487,7 +2542,7 @@ export default function App() {
                     rows={3}
                     value={shareCodeInput}
                     onChange={(e) => setShareCodeInput(e.target.value)}
-                    placeholder="Kodu dışa aktarmak için aşağıya tıklayın veya POE2TC:... kodunu buraya yapıştırın"
+                    placeholder="Kodu dışa aktarmak için aşağıya tıklayın veya POE2TC:... / Path of Building 2 kodunu buraya yapıştırın"
                     style={{
                       width: '100%',
                       boxSizing: 'border-box',
