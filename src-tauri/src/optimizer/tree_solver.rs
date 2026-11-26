@@ -3,6 +3,14 @@
 use crate::updater::models::{PassiveNode, PassiveTree};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+const MAX_EDGE_DISTANCE: f32 = 900.0;
+
+fn is_valid_edge(a: &PassiveNode, b: &PassiveNode) -> bool {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    (dx * dx + dy * dy).sqrt() <= MAX_EDGE_DISTANCE
+}
+
 pub struct TreeOptimizer<'a> {
     tree: &'a PassiveTree,
 }
@@ -72,7 +80,10 @@ pub fn optimize_tree(
                 if dist.contains_key(&nbr) {
                     continue;
                 }
-                if !tree.nodes.contains_key(&nbr) {
+                let Some(nbr_node) = tree.nodes.get(&nbr) else {
+                    continue;
+                };
+                if !is_valid_edge(curr_node, nbr_node) {
                     continue;
                 }
 
@@ -110,9 +121,11 @@ pub fn optimize_tree(
                 if let Some(n) = tree.nodes.get(&id) {
                     for &nbr in &n.neighbors {
                         if !allocated_set.contains(&nbr) {
-                            if tree.nodes.contains_key(&nbr) {
-                                fallback = Some(nbr);
-                                break 'outer;
+                            if let Some(nbr_node) = tree.nodes.get(&nbr) {
+                                if is_valid_edge(n, nbr_node) {
+                                    fallback = Some(nbr);
+                                    break 'outer;
+                                }
                             }
                         }
                     }

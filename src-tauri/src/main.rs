@@ -1,24 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod engine;
-mod optimizer;
-mod updater;
-
-use crate::engine::stat_parser::{
+use poe2_theorycrafter::engine::stat_parser::{
     evaluate_build_snapshot, BuildEvaluationRequest, BuildEvaluationResult,
 };
-use crate::optimizer::gem_solver::{recommend_supports, SupportRecommendation};
-use crate::optimizer::tree_solver::optimize_tree;
-use crate::updater::models::{ClassStart, GameDatabase, GemData, PassiveNode};
-use crate::updater::DataUpdater;
+use poe2_theorycrafter::optimizer::gem_solver::{recommend_supports, SupportRecommendation};
+use poe2_theorycrafter::optimizer::tree_solver::optimize_tree;
+use poe2_theorycrafter::updater::models::{ClassStart, GameDatabase, GemData, PassiveNode};
+use poe2_theorycrafter::updater::DataUpdater;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager, State};
 
+/// PoE 2 maksimum pasif puan (~123) + pay: aşırı büyük değerlerin CPU ve kilidi kilitlemesini önler.
+pub const MAX_OPTIMIZER_POINTS: usize = 150;
+
 pub struct AppState {
-    pub db: Mutex<Option<GameDatabase>>,
+    pub db: Mutex<Option<Arc<GameDatabase>>>,
     pub data_dir: PathBuf,
 }
 
@@ -35,15 +34,20 @@ struct ActiveGemsResponse {
     total_gems: usize,
 }
 
-#[tauri::command]
-fn get_passive_tree(state: State<'_, AppState>) -> Result<PassiveTreeResponse, String> {
+fn get_db_snapshot(state: &State<'_, AppState>) -> Result<Arc<GameDatabase>, String> {
     let guard = state
         .db
         .lock()
         .map_err(|_| "Veritabanı kilidi alınamadı".to_string())?;
-    let db = guard
+    guard
         .as_ref()
-        .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())?;
+        .cloned()
+        .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())
+}
+
+#[tauri::command]
+fn get_passive_tree(state: State<'_, AppState>) -> Result<PassiveTreeResponse, String> {
+    let db = get_db_snapshot(&state)?;
 
     Ok(PassiveTreeResponse {
         nodes: db.tree.nodes.clone(),
@@ -54,13 +58,7 @@ fn get_passive_tree(state: State<'_, AppState>) -> Result<PassiveTreeResponse, S
 
 #[tauri::command]
 fn list_active_gems(state: State<'_, AppState>) -> Result<ActiveGemsResponse, String> {
-    let guard = state
-        .db
-        .lock()
-        .map_err(|_| "Veritabanı kilidi alınamadı".to_string())?;
-    let db = guard
-        .as_ref()
-        .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())?;
+    let db = get_db_snapshot(&state)?;
 
     let mut active_skills: Vec<GemData> = db
         .gems
@@ -97,7 +95,7 @@ async fn trigger_patch_update(
             .db
             .lock()
             .map_err(|_| "Veritabanı kilidi alınamadı".to_string())?;
-        *guard = Some(new_db);
+        *guard = Some(Arc::new(new_db));
     }
 
     let _ = app.emit("game-data-updated", "ok");
@@ -114,15 +112,18 @@ fn optimize_passive_tree(
     weights: HashMap<String, f32>,
     state: State<'_, AppState>,
 ) -> Result<Vec<u32>, String> {
-    let guard = state
-        .db
-        .lock()
-        .map_err(|_| "Veritabanı kilidi alınamadı".to_string())?;
-    let db = guard
-        .as_ref()
-        .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())?;
+    // Kilidi yalnızca Arc referansını alana kadar tutar, hesaplama sırasında kilidi serbest bırakır
+    let db = get_db_snapshot(&state)?;
+    let capped_points = max_points
+        .min(MAX_OPTIMIZER_POINTS)
+        .min(db.tree.nodes.len());
 
-    Ok(optimize_tree(&db.tree, start_node_id, max_points, &weights))
+    Ok(optimize_tree(
+        &db.tree,
+        start_node_id,
+        capped_points,
+        &weights,
+    ))
 }
 
 #[tauri::command]
@@ -131,13 +132,7 @@ fn recommend_support_gems(
     allocated_ids: Vec<u32>,
     state: State<'_, AppState>,
 ) -> Result<Vec<SupportRecommendation>, String> {
-    let guard = state
-        .db
-        .lock()
-        .map_err(|_| "Veritabanı kilidi alınamadı".to_string())?;
-    let db = guard
-        .as_ref()
-        .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())?;
+    let db = get_db_snapshot(&state)?;
 
     Ok(recommend_supports(
         &db.gems,
@@ -152,13 +147,7 @@ fn evaluate_build(
     req: BuildEvaluationRequest,
     state: State<'_, AppState>,
 ) -> Result<BuildEvaluationResult, String> {
-    let guard = state
-        .db
-        .lock()
-        .map_err(|_| "Veritabanı kilidi alınamadı".to_string())?;
-    let db = guard
-        .as_ref()
-        .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())?;
+    let db = get_db_snapshot(&state)?;
 
     Ok(evaluate_build_snapshot(&req, &db.tree.nodes, &db.gems))
 }
@@ -168,13 +157,7 @@ fn evaluate_builds_batch(
     requests: Vec<BuildEvaluationRequest>,
     state: State<'_, AppState>,
 ) -> Result<Vec<BuildEvaluationResult>, String> {
-    let guard = state
-        .db
-        .lock()
-        .map_err(|_| "Veritabanı kilidi alınamadı".to_string())?;
-    let db = guard
-        .as_ref()
-        .ok_or_else(|| "Veritabanı henüz yüklenmedi".to_string())?;
+    let db = get_db_snapshot(&state)?;
 
     Ok(requests
         .iter()
@@ -197,7 +180,7 @@ fn main() {
                 .unwrap_or_else(|_| PathBuf::from("./poe2_data"));
             let _ = std::fs::create_dir_all(&data_dir);
 
-            let initial_db = load_cached_db(&data_dir);
+            let initial_db = load_cached_db(&data_dir).map(Arc::new);
             app.manage(AppState {
                 db: Mutex::new(initial_db),
                 data_dir,

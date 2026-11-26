@@ -1,3 +1,4 @@
+@"
 # Bağımlılıklar (npm install ile geri gelir)
 node_modules/
 dist/
@@ -21,3 +22,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+"@ | Out-File -FilePath .gitignore -Encoding utf8
+
+git init
+git add .
+git commit -m "feat: initial working PoE2 Theorycrafter build"

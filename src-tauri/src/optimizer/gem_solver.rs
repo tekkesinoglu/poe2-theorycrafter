@@ -3,12 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GemListResponse {
-    pub active_skills: Vec<GemData>,
-    pub total_gems: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SupportRecommendation {
     pub id: String,
     pub name: String,
@@ -73,12 +67,22 @@ pub fn recommend_supports(
     allocated_ids: &[u32],
     active_skill_id: &str,
 ) -> Vec<SupportRecommendation> {
-    let actives = get_active_skills(gems);
-    let Some(active) = actives
-        .iter()
-        .find(|g| g.id == active_skill_id || g.name.eq_ignore_ascii_case(active_skill_id))
-    else {
-        return vec![];
+    // Ön yüzdeki tüm aktif yetenekleri (etiketi boş olan Ascendancy/özel yetenekler dahil) bul
+    let fallback_list;
+    let active = if let Some(found) = gems.get(active_skill_id).or_else(|| {
+        gems.values()
+            .find(|g| !g.is_support && g.name.eq_ignore_ascii_case(active_skill_id))
+    }) {
+        found
+    } else {
+        fallback_list = get_active_skills(gems);
+        let Some(fb) = fallback_list
+            .iter()
+            .find(|g| g.id == active_skill_id || g.name.eq_ignore_ascii_case(active_skill_id))
+        else {
+            return vec![];
+        };
+        fb
     };
 
     let active_tags: HashSet<String> = active.tags.iter().map(|t| t.to_lowercase()).collect();
@@ -94,6 +98,7 @@ pub fn recommend_supports(
                     "fire",
                     "cold",
                     "physical",
+                    "chaos",
                     "critical",
                     "shock",
                     "ignite",
@@ -101,6 +106,10 @@ pub fn recommend_supports(
                     "area",
                     "projectile",
                     "speed",
+                    "duration",
+                    "curse",
+                    "warcry",
+                    "totem",
                 ] {
                     if l.contains(kw) {
                         *tree_keywords.entry(kw).or_insert(0.0) += 1.0;
@@ -110,7 +119,9 @@ pub fn recommend_supports(
         }
     }
 
+    // (İsim, Gerekli Etiketler, Yasaklı Etiket, Taban Çarpan %, Çakışma Grubu, Açıklama)
     let support_catalog: Vec<(&str, Vec<&str>, Option<&str>, f32, Option<&str>, &str)> = vec![
+        // Doğrudan Hasar & Saldırı/Büyü Çarpanları
         ("Considered Casting", vec!["spell"], None, 35.0, None, "Spell More Damage çarpanı sağlar"),
         ("Concentrated Effect", vec!["area"], None, 34.0, None, "Alan yeteneklerine yüksek More Area Damage verir"),
         ("Brutality", vec!["physical"], None, 33.0, Some("dmg_type"), "Saf Fiziksel More Damage (Element hasarını kapatır)"),
@@ -129,15 +140,46 @@ pub fn recommend_supports(
         ("Arcane Tempo", vec!["spell"], None, 25.0, None, "More Cast Speed ile saniyelik hasarı artırır"),
         ("Martial Tempo", vec!["attack"], None, 25.0, None, "More Attack Speed ile DPS çarpanı sağlar"),
         ("Conduction", vec!["lightning"], None, 24.0, Some("ailment"), "Shock uygulama şansını ve süresini artırır"),
-        ("Magnified Effect", vec!["area"], None, 24.0, None, "Alan (AoE) yarıçapını ve isabeti artırır"),
+        ("Magnified Effect", vec!["area", "aura", "curse", "warcry"], None, 24.0, None, "Alan (AoE) yarıçapını ve etki menzilini artırır"),
         ("Fork", vec!["projectile"], None, 22.0, None, "Mermilerin çarpınca ikiye ayrılmasını sağlar"),
+
+        // Chaos, Duration, Curse, Mark & Totem Destekleri
+        ("Withering Touch", vec!["chaos"], None, 27.0, None, "Chaos vuruşlarında Withered yükü biriktirir"),
+        ("Comorbidity", vec!["chaos"], None, 25.0, None, "Chaos ve Poison etkilerinin süresini ve hasarını artırır"),
+        ("Persistence", vec!["duration", "curse", "mark", "guard", "totem", "banner"], Some("persistent"), 26.0, Some("duration_mod"), "Yeteneğin aktif kalma süresini uzatır"),
+        ("Fast Forward", vec!["duration", "curse", "mark"], Some("persistent"), 24.0, Some("duration_mod"), "Süre bazlı etkilerin daha hızlı tetiklenmesini sağlar"),
+        ("Heightened Curse", vec!["curse"], None, 28.0, None, "Curse etkisinin düşman üzerindeki gücünü artırır"),
+        ("Ritualistic Curse", vec!["curse"], None, 24.0, None, "Curse alanını ve uygulama hızını iyileştirir"),
+        ("Focused Curse", vec!["curse", "mark"], None, 25.0, None, "Curse ve Mark aktivasyon gecikmesini azaltır"),
+        ("Overabundance", vec!["totem"], None, 29.0, None, "Maksimum aktif Totem sınırını +1 artırır"),
+        ("Ancestral Urgency", vec!["totem"], None, 25.0, None, "Totem yerleştirme hızını ciddi oranda artırır"),
+
+        // Persistent Buff, Aura, Herald & Spirit Destekleri
+        ("Cannibalism", vec!["persistent", "buff", "aura", "herald"], None, 24.0, None, "Düşman öldürünce anında Life yenilemesi sağlar"),
+        ("Vitality", vec!["persistent", "buff", "aura"], None, 22.0, None, "Saniyelik sabit Life yenilenmesi kazandırır"),
+        ("Clarity", vec!["persistent", "buff", "aura"], None, 22.0, None, "Mana yenilenme hızını artırır"),
+        ("Precision", vec!["persistent", "buff", "aura"], None, 23.0, None, "Accuracy ve Critical Hit şansını yükseltir"),
+        ("Herbalism", vec!["persistent", "buff", "aura"], None, 21.0, None, "Life Flask iyileştirme miktarını artırır"),
+        ("Mysticism", vec!["persistent", "buff", "aura"], None, 21.0, None, "Energy Shield ve Mana kapasitesiyle sinerji sağlar"),
+
+        // Meta, Trigger, Warcry, Guard, Channeling & Travel Destekleri
+        ("Impetus", vec!["meta", "trigger"], None, 30.0, None, "Meta yeteneklerin Energy kazanım hızını artırır"),
+        ("Energy Retention", vec!["meta", "trigger"], None, 27.0, None, "Tetikleme sonrası harcanan Energy'nin bir kısmını korur"),
+        ("Boundless Energy", vec!["meta", "trigger"], None, 26.0, None, "Maksimum Energy kapasitesini ve tetikleme sıklığını artırır"),
+        ("Raging Cry", vec!["warcry"], None, 28.0, None, "Warcry güçlendirmesini ve hasar bonusunu artırır"),
+        ("Corrupting Cry", vec!["warcry"], None, 25.0, None, "Warcry alanındaki düşmanlara fiziksel/kaos zayıflatması uygular"),
+        ("Second Wind", vec!["travel", "movement", "warcry", "guard", "banner"], None, 24.0, None, "Cooldown recovery hızını artırır ve ekstra kullanım hakkı verir"),
+        ("Momentum", vec!["travel", "movement", "channeling"], None, 24.0, None, "Hareket veya odaklanma sonrası saldırı/büyü hızı verir"),
+        ("Unbreakable", vec!["channeling", "guard", "slam"], None, 25.0, None, "Yetenek kullanımı sırasında Stun direncini artırır"),
+        ("Inspiration", vec!["spell", "attack", "warcry", "curse", "mark", "totem", "travel"], None, 20.0, None, "Yeteneğin Mana maliyetini düşürür"),
+        ("Ingenuity", vec!["duration", "warcry", "guard", "banner", "travel", "movement"], None, 21.0, None, "Bekleme süresi (Cooldown) toparlanma hızını artırır"),
     ];
 
     let mut candidates: Vec<(SupportRecommendation, Option<&str>)> = Vec::new();
 
-    for (name, req_tags, forbid_tag, base_mult, conflict_group, desc) in support_catalog {
+    for (name, req_tags, forbid_tag, base_mult, conflict_group, desc) in &support_catalog {
         if let Some(forbid) = forbid_tag {
-            if active_tags.contains(forbid) {
+            if active_tags.contains(*forbid) {
                 continue;
             }
         }
@@ -158,11 +200,10 @@ pub fn recommend_supports(
             continue;
         }
 
-        let mut mult = base_mult;
-        let mut reason = desc.to_string();
+        let mut mult = *base_mult;
+        let mut reason = (*desc).to_string();
 
-        // Öneri Yüzdeliği (0-100): Temel uyum (62) + etiket eşleşmesi + DPS gücü + ağaç sinerjisi
-        let mut score_pct: f32 = 62.0 + (matched.len() as f32 * 6.0) + ((base_mult - 20.0) * 0.8);
+        let mut score_pct: f32 = 62.0 + (matched.len() as f32 * 6.0) + ((*base_mult - 20.0) * 0.8);
 
         let lower_name = name.to_lowercase();
         if lower_name.contains("critical") {
@@ -199,7 +240,39 @@ pub fn recommend_supports(
                 matched_tags: matched,
                 reason,
             },
-            conflict_group,
+            *conflict_group,
+        ));
+    }
+
+    // Etiketsiz veya özel etiketli aktif yetenekler için boş liste dönmesini önleyen genel fayda yedeği
+    if candidates.is_empty() {
+        let fallback_tag = active
+            .tags
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "utility".to_string());
+
+        candidates.push((
+            SupportRecommendation {
+                id: "inspiration".to_string(),
+                name: "Inspiration Support".to_string(),
+                multiplier_pct: 20.0,
+                match_score_pct: 64,
+                matched_tags: vec![fallback_tag.clone()],
+                reason: "Yeteneğin kaynak (Mana/Maliyet) tüketimini azaltır".to_string(),
+            },
+            None,
+        ));
+        candidates.push((
+            SupportRecommendation {
+                id: "ingenuity".to_string(),
+                name: "Ingenuity Support".to_string(),
+                multiplier_pct: 21.0,
+                match_score_pct: 62,
+                matched_tags: vec![fallback_tag],
+                reason: "Yeteneğin bekleme süresi ve kullanım akıcılığını iyileştirir".to_string(),
+            },
+            None,
         ));
     }
 
@@ -230,4 +303,106 @@ pub fn recommend_supports(
     }
 
     final_list
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::updater::models::PassiveNode;
+
+    fn make_gem(id: &str, name: &str, tags: &[&str]) -> (String, GemData) {
+        (
+            id.to_string(),
+            GemData {
+                id: id.to_string(),
+                name: name.to_string(),
+                is_support: false,
+                tags: tags.iter().map(|s| s.to_string()).collect(),
+                spirit_cost: 0,
+                str_req_weight: 0.3,
+                dex_req_weight: 0.3,
+                int_req_weight: 0.4,
+            },
+        )
+    }
+
+    fn dummy_tree() -> PassiveTree {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            1,
+            PassiveNode {
+                id: 1,
+                name: "Test Node".to_string(),
+                stats: vec![
+                    "+15% increased Critical Hit Chance".to_string(),
+                    "+10% increased Chaos Damage".to_string(),
+                    "+12% increased Skill Effect Duration".to_string(),
+                ],
+                is_keystone: false,
+                is_notable: true,
+                is_attribute_choice: false,
+                x: 0.0,
+                y: 0.0,
+                neighbors: vec![],
+                icon: None,
+            },
+        );
+        PassiveTree {
+            nodes,
+            classes: vec![],
+            sprite_sheets: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn all_archetypes_and_untagged_skills_return_recommendations() {
+        let test_cases = vec![
+            make_gem("spark", "Spark", &["spell", "projectile", "lightning"]),
+            make_gem("despair", "Despair", &["curse", "chaos", "area", "duration"]),
+            make_gem("snipers_mark", "Sniper's Mark", &["mark", "duration"]),
+            make_gem("grim_feast", "Grim Feast", &["persistent", "buff"]),
+            make_gem("archmage", "Archmage", &["persistent", "buff", "lightning"]),
+            make_gem("cast_on_freeze", "Cast on Freeze", &["meta", "trigger", "persistent"]),
+            make_gem("infernal_cry", "Infernal Cry", &["warcry", "area", "fire", "duration"]),
+            make_gem("blink", "Blink", &["travel", "movement", "duration"]),
+            make_gem("shield_wall", "Shield Wall", &["guard", "duration"]),
+            make_gem("ancestral_warrior_totem", "Ancestral Warrior Totem", &["totem", "melee", "duration"]),
+            make_gem("war_banner", "War Banner", &["banner", "area", "duration"]),
+            make_gem("contagion", "Contagion", &["spell", "chaos", "area", "duration"]),
+            make_gem("abyssal_apparition", "Abyssal Apparition", &[]),
+        ];
+
+        let gems: HashMap<String, GemData> = test_cases.into_iter().collect();
+        let tree = dummy_tree();
+
+        for skill in gems.values() {
+            let recs = recommend_supports(&gems, &tree, &[1], &skill.id);
+            assert!(
+                !recs.is_empty(),
+                "Aktif yetenek için support önerisi boş döndü: {} (tags: {:?})",
+                skill.name,
+                skill.tags
+            );
+            assert!(recs.len() <= 6);
+            for r in &recs {
+                assert!((50..=99).contains(&r.match_score_pct));
+            }
+        }
+    }
+
+    #[test]
+    fn fallback_skills_also_return_recommendations() {
+        let empty_gems = HashMap::new();
+        let tree = dummy_tree();
+        let actives = get_active_skills(&empty_gems);
+
+        for skill in &actives {
+            let recs = recommend_supports(&empty_gems, &tree, &[1], &skill.id);
+            assert!(
+                !recs.is_empty(),
+                "Fallback yetenek boş öneri döndürdü: {}",
+                skill.name
+            );
+        }
+    }
 }

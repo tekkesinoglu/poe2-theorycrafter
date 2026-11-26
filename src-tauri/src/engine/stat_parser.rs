@@ -258,7 +258,7 @@ pub fn evaluate_build_snapshot(
     let mut spirit_dps_factor = 1.0;
     let mut used_spirit = 0;
     for sb in &req.active_spirit_buffs {
-        used_spirit = i32::saturating_add(used_spirit, sb.cost);
+        used_spirit += sb.cost;
         inc_crit_chance += sb.inc_crit_chance;
         inc_evasion += sb.inc_evasion_pct;
         inc_es += sb.inc_es_pct;
@@ -332,8 +332,7 @@ pub fn evaluate_build_snapshot(
         * crit_factor)
         .round() as i64;
 
-    // Taşmayı önlemek için makul aralığa sıkıştır (bozuk veride i32 sarmasın)
-    let tree_and_asc_spirit = (tree_spirit + asc_spirit).round().clamp(-10_000.0, 10_000.0) as i32;
+    let tree_and_asc_spirit = (tree_spirit + asc_spirit).round() as i32;
     let max_spirit = 100 + req.gear_spirit.clamp(0, 500) + tree_and_asc_spirit;
 
     BuildEvaluationResult {
@@ -349,7 +348,7 @@ pub fn evaluate_build_snapshot(
         est_dps,
         max_spirit,
         used_spirit,
-        remaining_spirit: max_spirit.saturating_sub(used_spirit),
+        remaining_spirit: max_spirit - used_spirit,
         tree_and_asc_spirit,
         support_more_pct: ((support_factor - 1.0) * 100.0).round() as i64,
         support_count: top_five.len(),

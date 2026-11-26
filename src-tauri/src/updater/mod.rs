@@ -12,6 +12,9 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// `game_data.bin` içeriğinin biçimi değiştiğinde artırılır (3: BC1/BC3/BC7 + tüm DDS atlasları).
+const DATA_FORMAT_VERSION: u32 = 3;
+
 pub struct DataUpdater {
     data_dir: PathBuf,
     client: Client,
@@ -21,8 +24,6 @@ impl DataUpdater {
     pub fn new(app_data_dir: PathBuf) -> Self {
         let client = Client::builder()
             .user_agent("PoE2-Theorycrafter/0.1")
-            .connect_timeout(std::time::Duration::from_secs(15))
-            .timeout(std::time::Duration::from_secs(120))
             .build()
             .unwrap_or_else(|_| Client::new());
 
@@ -35,7 +36,8 @@ impl DataUpdater {
     pub async fn sync_game_data(&self, force: bool) -> Result<GameDatabase> {
         fs::create_dir_all(&self.data_dir)?;
         let bin_path = self.data_dir.join("game_data.bin");
-        let (branch, latest_hash) = self.fetch_repo_info().await?;
+        let (branch, upstream_sha) = self.fetch_repo_info().await?;
+        let latest_hash = format!("{}#fmt{}", upstream_sha, DATA_FORMAT_VERSION);
 
         if !force && bin_path.exists() {
             match fs::read(&bin_path) {
@@ -83,7 +85,7 @@ impl DataUpdater {
 
         let mut sprite_sheets = HashMap::new();
 
-        // Yeni biçim: zstd'li BC1 doku dizileri (`*.dds.zst`) -> PNG atlas
+        // Yeni biçim: zstd'li doku dizileri (`*.dds.zst`) -> PNG atlas
         let (dds_files, legacy_files): (Vec<String>, Vec<String>) = needed_files
             .into_iter()
             .partition(|f| f.ends_with(".dds.zst"));
@@ -229,12 +231,7 @@ impl DataUpdater {
             })
             .unwrap_or_default();
 
-        // Sayısal sıralama: "0_10" > "0_9" (alfabetik sıralama bunu yanlış yapardı)
-        folders.sort_by_key(|name| {
-            name.split('_')
-                .map(|p| p.parse::<u32>().unwrap_or(0))
-                .collect::<Vec<u32>>()
-        });
+        folders.sort();
         Ok(folders.pop().unwrap_or_else(|| "0_1".to_string()))
     }
 
@@ -245,7 +242,8 @@ impl DataUpdater {
         atlas_name: &str,
         layers: &[u32],
     ) -> Result<dds_atlas::Atlas> {
-        let url = format!("{}/src/TreeData/{}/{}", raw_base, folder, atlas_name);
+        let clean = atlas_name.trim_start_matches('/');
+        let url = format!("{}/src/TreeData/{}/{}", raw_base, folder, clean);
         let bytes = self
             .client
             .get(&url)
@@ -258,7 +256,6 @@ impl DataUpdater {
         if bytes.len() > 64 * 1024 * 1024 {
             anyhow::bail!("{} beklenenden büyük ({} bayt)", atlas_name, bytes.len());
         }
-        // Hücreler en fazla 64 px: tuval simgeleri zaten ~28-64 px çiziyor
         dds_atlas::build_atlas(&bytes, layers, 64)
     }
 
@@ -283,8 +280,6 @@ impl DataUpdater {
             .as_object()
             .context("tree.json içinde 'nodes' bulunamadı")?;
 
-        // 1. Doğrudan `groups[i].nodes` listesinden `node_id -> (gx, gy)` ters haritası kur
-        // (0-tabanlı / 1-tabanlı dizi indeks kaymasını kesin olarak önler)
         let mut node_group_coords: HashMap<u32, (f32, f32)> = HashMap::new();
         if let Some(groups_arr) = raw["groups"].as_array() {
             for g in groups_arr {
@@ -365,7 +360,7 @@ impl DataUpdater {
                     if let Some(coords) = sheet_info["coords"].as_object() {
                         for (icon_key, rect) in coords {
                             sprite_lookup.insert(
-                                icon_key.clone(),
+                                normalize_icon_key(icon_key),
                                 SpriteRect {
                                     filename: filename.clone(),
                                     x: rect["x"].as_u64().unwrap_or(0) as u32,
@@ -380,20 +375,18 @@ impl DataUpdater {
             }
         }
 
-        // Yeni biçim: `ddsCoords["skills_*.dds.zst"][simge_yolu] = katman (1 tabanlı)`.
-        // Burada yalnızca yer tutucu SpriteRect (x = katman, w = 0) üretilir;
-        // gerçek hücre koordinatları atlas oluşturulunca `sync_game_data` içinde atanır.
+        // Tüm `*.dds.zst` atlaslarını (skills_, notables_, keystones_, passives_ vb.) kabul et
         let mut dds_lookup: HashMap<String, SpriteRect> = HashMap::new();
         if let Some(dds_obj) = raw["ddsCoords"].as_object() {
             for (atlas, entries) in dds_obj {
-                if !(atlas.starts_with("skills_") && atlas.ends_with(".dds.zst")) {
+                if !atlas.ends_with(".dds.zst") {
                     continue;
                 }
                 let Some(map) = entries.as_object() else { continue };
                 for (icon_key, layer) in map {
                     if let Some(l) = layer.as_u64().and_then(|v| u32::try_from(v).ok()) {
                         dds_lookup.insert(
-                            icon_key.to_lowercase(),
+                            normalize_icon_key(icon_key),
                             SpriteRect {
                                 filename: atlas.clone(),
                                 x: l,
@@ -407,7 +400,6 @@ impl DataUpdater {
             }
         }
 
-        // Yalnızca PoE2'nin resmi 6 sınıfını kabul et (Marauder/Duelist/Templar/Shadow kalıntılarını ele)
         let valid_poe2_classes: HashSet<String> = raw["classes"]
             .as_array()
             .map(|arr| {
@@ -427,24 +419,20 @@ impl DataUpdater {
                 continue;
             };
 
-            // Ascendancy adalarını ve Ascendancy başlangıç düğümlerini ana ağaçtan ayır
             if n.get("ascendancyName").and_then(|v| v.as_str()).is_some()
                 || n["isAscendancyStart"].as_bool().unwrap_or(false)
             {
                 continue;
             }
 
-            // Mastery hayalet düğümlerini (`isOnlyImage: true`) ana ağaçtan ayır
             if n["isOnlyImage"].as_bool().unwrap_or(false) {
                 continue;
             }
 
-            // Grup koordinatı olmayan görünmez root düğümlerini dışla
             let Some(&(gx, gy)) = node_group_coords.get(&id) else {
                 continue;
             };
 
-            // Sınıf başlangıç düğümü tespiti (`classesStart: ["Duelist", "Mercenary"]`)
             if let Some(cs_arr) = n["classesStart"].as_array() {
                 for entry in cs_arr {
                     if let Some(cname) = entry.as_str() {
@@ -492,14 +480,13 @@ impl DataUpdater {
                 || n["isMultipleChoice"].as_bool().unwrap_or(false)
                 || n["isAttribute"].as_bool().unwrap_or(false);
 
-            let icon = n["icon"]
-                .as_str()
-                .and_then(|ic| {
-                    sprite_lookup
-                        .get(ic)
-                        .cloned()
-                        .or_else(|| dds_lookup.get(&ic.to_lowercase()).cloned())
-                });
+            let icon = n["icon"].as_str().and_then(|ic| {
+                let norm = normalize_icon_key(ic);
+                sprite_lookup
+                    .get(&norm)
+                    .cloned()
+                    .or_else(|| dds_lookup.get(&norm).cloned())
+            });
 
             let mut conns = Vec::new();
             if let Some(arr) = n["connections"].as_array() {
@@ -540,7 +527,6 @@ impl DataUpdater {
             );
         }
 
-        // Yalnızca geçerli ana ağaç düğümleri arasında çift yönlü kenarları kur
         let mut adjacency: HashMap<u32, HashSet<u32>> = HashMap::new();
         for (&from_id, targets) in &raw_connections {
             if !nodes.contains_key(&from_id) {
@@ -585,27 +571,9 @@ impl DataUpdater {
         let mut str_req_weight: f32 = 0.0;
         let mut dex_req_weight: f32 = 0.0;
         let mut int_req_weight: f32 = 0.0;
-        let mut in_tags = false;
 
         for raw_line in lua_code.lines() {
             let line = raw_line.trim();
-
-            // Çok satırlı `tags = { ... }` bloğunun içindeki satırlar
-            if in_tags {
-                if line.starts_with('}') {
-                    in_tags = false;
-                } else if let Some((k, v)) = line.trim_end_matches(',').split_once('=') {
-                    let tag_name = k.trim().trim_matches('"');
-                    if v.trim() == "true" && !tag_name.is_empty() {
-                        // Gerçek veride destek gemleri `support = true` etiketiyle işaretli
-                        if tag_name == "support" {
-                            is_support = true;
-                        }
-                        tags.push(tag_name.to_string());
-                    }
-                }
-                continue;
-            }
 
             if line.starts_with("[\"") && line.contains("\"] = {") {
                 if let Some(id) = current_id.take() {
@@ -634,7 +602,6 @@ impl DataUpdater {
                     str_req_weight = 0.0;
                     dex_req_weight = 0.0;
                     int_req_weight = 0.0;
-                    in_tags = false;
                 }
             } else if current_id.is_some() {
                 if let Some(rest) = line.strip_prefix("name = \"") {
@@ -651,9 +618,6 @@ impl DataUpdater {
                     dex_req_weight = rest.trim_end_matches(',').parse::<f32>().unwrap_or(0.0);
                 } else if let Some(rest) = line.strip_prefix("reqInt = ") {
                     int_req_weight = rest.trim_end_matches(',').parse::<f32>().unwrap_or(0.0);
-                } else if line.starts_with("tags = {") && !line.contains('}') {
-                    // Gerçek Gems.lua çok satırlı yazıyor: sonraki satırlar okunacak
-                    in_tags = true;
                 } else if line.starts_with("tags = {") {
                     let inner = line
                         .trim_start_matches("tags = {")
@@ -694,11 +658,17 @@ impl DataUpdater {
     }
 }
 
+fn normalize_icon_key(raw: &str) -> String {
+    let unified = raw.trim().replace('\\', "/").to_lowercase();
+    unified
+        .strip_suffix(".dds")
+        .or_else(|| unified.strip_suffix(".png"))
+        .unwrap_or(&unified)
+        .to_string()
+}
+
 fn atomic_write(target: &Path, data: &[u8]) -> Result<()> {
-    // Eş zamanlı yazımlar aynı .tmp dosyasını ezmesin diye benzersiz geçici ad
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp_path = target.with_extension(format!("tmp.{}.{}", std::process::id(), n));
+    let tmp_path = target.with_extension("tmp");
     let mut file = fs::File::create(&tmp_path)?;
     file.write_all(data)?;
     file.sync_all()?;
