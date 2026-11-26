@@ -274,7 +274,13 @@ export default function App() {
   const [savedBuilds, setSavedBuilds] = useState<SavedBuild[]>(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      return raw ? JSON.parse(raw) : [];
+      const parsed = raw ? JSON.parse(raw) : [];
+      // Bozuk/elle değiştirilmiş kayıt beyaz ekrana yol açmasın
+      return Array.isArray(parsed)
+        ? parsed.filter(
+            (b) => b && typeof b === 'object' && typeof b.id === 'string' && Array.isArray(b.allocatedIds)
+          )
+        : [];
     } catch {
       return [];
     }
@@ -677,8 +683,11 @@ export default function App() {
     }
   };
 
+  const updatingRef = useRef(false);
   const runUpdate = async (force = false) => {
-    if (isUpdating) return;
+    // Ref kullanılıyor: Ctrl+U işleyicisi eski state'i görüp eş zamanlı güncelleme başlatmasın
+    if (updatingRef.current) return;
+    updatingRef.current = true;
     setIsUpdating(true);
     showNotice('GitHub PoB2 reposundan yama verileri kontrol ediliyor...', 'info');
     try {
@@ -687,6 +696,7 @@ export default function App() {
     } catch (err) {
       showNotice(`Güncelleme hatası: ${err}`, 'error');
     } finally {
+      updatingRef.current = false;
       setIsUpdating(false);
     }
   };
