@@ -17,3 +17,4 @@ bincode = "1.3"
 image = { version = "0.25", default-features = false, features = ["dds", "png"] }
 base64 = "0.22"
 ruzstd = "0.9.1"
+miniz_oxide = "0.8"
