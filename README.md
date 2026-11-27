@@ -29,7 +29,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 Linux needs the [Tauri system dependencies](https://v2.tauri.app/start/prerequisites/#linux). Releases are built by GitHub Actions when a `v*` tag is pushed.
 
-DPS/EHP numbers are estimates and are **not** guaranteed to match Path of Building.
+DPS/EHP numbers are estimates and are **not** guaranteed to match Path of Building. Passive-tree Life / ES / Armour / Evasion are checked against PoB2 itself with `tools/pob2-compare` (median error ≤ 2% on sample builds).
 
 ## License
 MIT — see [LICENSE](LICENSE). Not affiliated with Grinding Gear Games. Path of Exile is a trademark of Grinding Gear Games; game data originates from Path of Building Community (MIT).

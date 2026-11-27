@@ -778,3 +778,51 @@ return {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+/// `tools/pob2-compare` için örnek build'leri JSON'a döker (POBDUMP_OUT / POBDUMP_TREE ayarlı değilse atlanır).
+mod pobdump {
+    use super::*;
+    use crate::engine::stat_parser::{evaluate_build_snapshot, BuildEvaluationRequest};
+    use crate::optimizer::tree_solver::optimize_tree;
+    use std::collections::HashMap;
+
+    #[test]
+    fn dump_builds() {
+        let Ok(out) = std::env::var("POBDUMP_OUT") else { return };
+        let raw: Value = serde_json::from_str(&std::fs::read_to_string(std::env::var("POBDUMP_TREE").unwrap()).unwrap()).unwrap();
+        let u = DataUpdater::new(std::env::temp_dir());
+        let tree = u.parse_passive_tree(&raw).unwrap();
+        let presets: Vec<(&str, Vec<(&str, f32)>)> = vec![
+            ("crit-spell", vec![("Spell Damage", 40.), ("Critical", 35.), ("Cast Speed", 15.), ("Energy Shield", 10.)]),
+            ("lightning", vec![("Lightning Damage", 55.), ("Critical", 25.), ("Energy Shield", 20.)]),
+            ("attack-speed", vec![("Attack Speed", 40.), ("Physical Damage", 30.), ("Critical", 20.), ("Maximum Life", 10.)]),
+            ("minion", vec![("Minion", 60.), ("Maximum Life", 25.), ("Spirit", 15.)]),
+            ("tank", vec![("Maximum Life", 50.), ("Armour", 30.), ("Evasion", 20.)]),
+            ("es", vec![("Energy Shield", 70.), ("Maximum Life", 10.), ("Spell Damage", 20.)]),
+        ];
+        let mut rows = Vec::new();
+        for c in tree.classes.iter().take(6) {
+            for (pid, w) in &presets {
+                for &pts in &[30usize, 80] {
+                    let weights: HashMap<String, f32> = w.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+                    let ids = optimize_tree(&tree, c.start_node_id, pts, &weights);
+                    let stats: Vec<String> = ids.iter().filter_map(|i| tree.nodes.get(i)).flat_map(|n| n.stats.clone()).collect();
+                    let _ = stats;
+                    let req = BuildEvaluationRequest {
+                        allocated_ids: ids.clone(), selected_skill_id: None, weapon_base_dps: 0.0,
+                        base_gem_level: 20, bonus_skill_levels: 0, gear_spirit: 0,
+                        active_spirit_buffs: vec![], active_ascendancy_nodes: vec![], supports: vec![],
+                    };
+                    let r = evaluate_build_snapshot(&req, &tree.nodes, &HashMap::new());
+                    rows.push(serde_json::json!({
+                        "class": c.name, "preset": pid, "points": pts, "nodes": ids,
+                        "app": {"ehp": r.effective_hp, "life": r.total_life, "es": r.total_es, "armour": r.total_armour,
+                                "evasion": r.total_evasion, "crit": r.effective_crit, "spirit": r.max_spirit}
+                    }));
+                }
+            }
+        }
+        std::fs::write(out, serde_json::to_string(&rows).unwrap()).unwrap();
+    }
+}

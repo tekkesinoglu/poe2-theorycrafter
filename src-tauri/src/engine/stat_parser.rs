@@ -154,6 +154,12 @@ pub fn parse_stat_lines(
     summary
 }
 
+fn is_conditional_line(lower: &str) -> bool {
+    [" if ", " while ", " when ", " per ", " recently", "from equipped", " against ", " with "]
+        .iter()
+        .any(|m| lower.contains(m))
+}
+
 pub fn evaluate_build_snapshot(
     req: &BuildEvaluationRequest,
     nodes: &HashMap<u32, PassiveNode>,
@@ -184,25 +190,50 @@ pub fn evaluate_build_snapshot(
     for (label, &val) in &parsed.totals {
         let l = label.to_lowercase();
 
-        if l.contains("to any attribute") || l.contains("to all attributes") {
+        // "+X to any Attribute" seçim düğümleridir (oyuncu Str/Dex/Int'ten birini seçer).
+        // Seçim bilinmediği için Strength'e düşen payı 1/3 varsayıyoruz; "to all Attributes" üçüne birden verir.
+        if l.contains("to any attribute") {
+            all_attr += val / 3.0;
+        }
+        if l.contains("to all attributes") {
+            all_attr += val;
+        }
+        // Açık Strength satırları ("+10 to Strength", "+5 to Strength and Dexterity"): PoB2'de 1 Strength = +2 Life
+        if !l.starts_with('%') && (l == "to strength" || l.starts_with("to strength and ")) {
             all_attr += val;
         }
         if l.contains("to maximum life") && !l.starts_with('%') {
             flat_life += val;
         }
-        if l.contains("increased maximum life") {
+        if l.contains("increased maximum life") && !is_conditional_line(&l) {
             inc_life += val;
         }
         if l.contains("to maximum energy shield") && !l.starts_with('%') {
             flat_es += val;
         }
-        if l.contains("increased maximum energy shield") || l.contains("increased energy shield") {
+        if (l.contains("increased maximum energy shield") || l.contains("increased energy shield"))
+            && !is_conditional_line(&l)
+        {
             inc_es += val;
         }
-        if l.contains("increased armour") {
+        // Koşullu satırlar ("while Leeching", "if you've been Hit Recently", "from Equipped Shield"...)
+        // PoB2'de varsayılan olarak aktif değildir; savunma tahminine katmıyoruz.
+        let conditional = is_conditional_line(&l);
+        // "reduced/increased Armour, Evasion and Energy Shield" üçüne birden uygulanır
+        if l.contains("armour, evasion and energy shield") && !conditional {
+            inc_armour += val;
+            inc_evasion += val;
+            inc_es += val;
+        }
+        if l.contains("increased armour")
+            && !l.contains("armour, evasion and energy shield")
+            && !conditional
+        {
             inc_armour += val;
         }
-        if l.contains("increased evasion") {
+        if (l.contains("increased evasion") || l.contains("increased armour and evasion"))
+            && !conditional
+        {
             inc_evasion += val;
         }
         if l.contains("critical hit chance") {
@@ -295,10 +326,10 @@ pub fn evaluate_build_snapshot(
         }
     }
 
-    let total_life = ((1150.0 + flat_life + all_attr * 2.0) * (1.0 + inc_life.max(0.0) / 100.0)).round() as i64;
-    let total_es = ((450.0 + flat_es) * (1.0 + inc_es.max(0.0) / 100.0)).round() as i64;
-    let total_armour = (1800.0 * (1.0 + inc_armour.max(0.0) / 100.0)).round() as i64;
-    let total_evasion = (1800.0 * (1.0 + inc_evasion.max(0.0) / 100.0)).round() as i64;
+    let total_life = ((1150.0 + flat_life + all_attr * 2.0) * (1.0 + inc_life / 100.0).max(0.1)).round() as i64;
+    let total_es = ((450.0 + flat_es) * (1.0 + inc_es / 100.0).max(0.1)).round() as i64;
+    let total_armour = (1800.0 * (1.0 + inc_armour / 100.0).max(0.1)).round() as i64;
+    let total_evasion = (1800.0 * (1.0 + inc_evasion / 100.0).max(0.1)).round() as i64;
 
     let phys_mit = (total_armour as f64) / ((total_armour as f64) + 8000.0);
     let evade_mit = ((total_evasion as f64) / ((total_evasion as f64) + 3500.0)).min(0.55);
