@@ -231,6 +231,20 @@ export const EN: Record<string, string> = {
   "Bekleme süresi (Cooldown) toparlanma hızını artırır": "Increases Cooldown recovery rate",
   "Yeteneğin kaynak (Mana/Maliyet) tüketimini azaltır": "Reduces the skill's resource (Mana/cost) consumption",
   "Yeteneğin bekleme süresi ve kullanım akıcılığını iyileştirir": "Improves the skill's cooldown and usage flow",
+  "Hazır şablonlar:": "Presets:",
+  "Neden bu düğümler?": "Why these nodes?",
+  "{n} düğümün {m} tanesi hedef statlarına katkı veriyor; {k} tanesi yol / bağlantı düğümü.": "{m} of {n} nodes contribute to your target stats; {k} are travel / connector nodes.",
+  "{n} düğüm": "{n} nodes",
+  "Bazı statlar için hiç düğüm bulunamadı; ağırlığı farklı bir stata kaydırmayı deneyin.": "No nodes found for some stats; try moving that weight to a different stat.",
+  "Öne çıkan Keystone / Notable düğümler:": "Highlighted Keystone / Notable nodes:",
+  "Kritik Büyücü": "Crit Caster",
+  "Lightning Büyücü": "Lightning Caster",
+  "Fire / Cold Büyücü": "Fire / Cold Caster",
+  "Hızlı Saldırgan": "Fast Attacker",
+  "Evasion Saldırgan": "Evasion Attacker",
+  "Minion": "Minion",
+  "Tank (Life / Armour)": "Tank (Life / Armour)",
+  "Energy Shield Odaklı": "Energy Shield Focus",
 };
 
 /** Rust tarafı öneri açıklamasının sonuna Türkçe sinerji notu ekleyebilir; onu da çevirir. */
