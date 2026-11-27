@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { Lang, getLang, setLang, t } from './i18n';
 import { PassiveNode, SkillTreeCanvas } from './components/SkillTreeCanvas';
 import {
   ASCENDANCIES,
@@ -179,7 +180,8 @@ export default function App() {
   const [spriteSheets, setSpriteSheets] = useState<Record<string, string>>({});
   const [selectedStartId, setSelectedStartId] = useState<number>(0);
   const [allocatedIds, setAllocatedIds] = useState<number[]>([]);
-  const [status, setStatus] = useState<string>('Hazır');
+  const [lang, setLangState] = useState<Lang>(getLang());
+  const [status, setStatus] = useState<string>(t("Hazır"));
   const [toast, setToast] = useState<{ text: string; tone: 'info' | 'success' | 'error' } | null>(
     null
   );
@@ -337,7 +339,7 @@ export default function App() {
           name: g.name,
           cost: g.spirit_cost,
           category: 'Aura / Buff',
-          effectLabel: '+15% More Sinerji Hasarı',
+          effectLabel: "+15% More Sinerji Hasarı",
           moreDpsPct: 15,
         });
       }
@@ -457,7 +459,7 @@ export default function App() {
 
     const currentSnapshot = {
       id: 'CURRENT',
-      name: `Aktif Build (${activeAscendancy?.name || selectedBaseClassName || 'Mevcut'})`,
+      name: t('Aktif Build ({name})', { name: activeAscendancy?.name || selectedBaseClassName || t('Mevcut') }),
       allocatedIds,
       selectedSkillId,
       weaponBaseDps,
@@ -529,6 +531,7 @@ export default function App() {
     activeAscNodes,
     recommendedSupports,
     buildRustRequest,
+    lang,
   ]);
 
   const handleClassChange = (newStartId: number) => {
@@ -551,7 +554,7 @@ export default function App() {
     setSelectedAscNodeIds((prev) => {
       if (prev.includes(nodeId)) return prev.filter((x) => x !== nodeId);
       if (prev.length >= LIMITS.maxAscendancyNodes) {
-        showNotice('Maksimum 8 Ascendancy puanına (4 Major Notable) ulaşıldı.', 'error');
+        showNotice(t("Maksimum 8 Ascendancy puanına (4 Major Notable) ulaşıldı."), 'error');
         return prev;
       }
       return [...prev, nodeId];
@@ -565,9 +568,9 @@ export default function App() {
 
   const activeWeightsSummary = useMemo(() => {
     const active = statWeights.filter((w) => w.weight > 0);
-    if (active.length === 0) return 'Stat Seçilmedi';
+    if (active.length === 0) return t("Stat Seçilmedi");
     return active.map((w) => `${w.stat} %${w.weight}`).join(' • ');
-  }, [statWeights]);
+  }, [statWeights, lang]);
 
   const updateStatWeight = (stat: string, weight: number) => {
     setStatWeights((prev) => rebalanceWeights(prev, stat, weight));
@@ -676,7 +679,7 @@ export default function App() {
         }
       }
 
-      setStatus(`Ağaç yüklendi (${Object.keys(treeData.nodes).length} düğüm)`);
+      setStatus(t('Ağaç yüklendi ({n} düğüm)', { n: Object.keys(treeData.nodes).length }));
       await loadGemsFromRust();
     } catch (err) {
       setStatus(String(err));
@@ -689,12 +692,16 @@ export default function App() {
     if (updatingRef.current) return;
     updatingRef.current = true;
     setIsUpdating(true);
-    showNotice('GitHub PoB2 reposundan yama verileri kontrol ediliyor...', 'info');
+    showNotice(t("GitHub PoB2 reposundan yama verileri kontrol ediliyor..."), 'info');
     try {
       const msg = await invoke<string>('trigger_patch_update', { force });
-      showNotice(msg, 'success');
+      const done = msg.match(/^Güncelleme tamamlandı \((\d+) düğüm, (\d+) gem\)$/);
+      showNotice(
+        done ? t('Güncelleme tamamlandı ({n} düğüm, {g} gem)', { n: done[1], g: done[2] }) : msg,
+        'success'
+      );
     } catch (err) {
-      showNotice(`Güncelleme hatası: ${err}`, 'error');
+      showNotice(t('Güncelleme hatası: {err}', { err: t(String(err)) }), 'error');
     } finally {
       updatingRef.current = false;
       setIsUpdating(false);
@@ -715,7 +722,7 @@ export default function App() {
     }
 
     if (Object.keys(weights).length === 0) {
-      showNotice('Lütfen Stat Ağırlıkları panelinden en az bir stat ekleyin.', 'error');
+      showNotice(t("Lütfen Stat Ağırlıkları panelinden en az bir stat ekleyin."), 'error');
       setIsWeightDrawerOpen(true);
       return;
     }
@@ -731,11 +738,14 @@ export default function App() {
       });
       setAllocatedIds(resultIds);
       showNotice(
-        `Optimizasyon tamamlandı (${activeAscendancy?.name || selectedBaseClassName}): ${resultIds.length} puan dağıtıldı.`,
+        t('Optimizasyon tamamlandı ({name}): {n} puan dağıtıldı.', {
+          name: activeAscendancy?.name || selectedBaseClassName,
+          n: resultIds.length,
+        }),
         'success'
       );
     } catch (err) {
-      showNotice(`Optimizasyon hatası: ${err}`, 'error');
+      showNotice(t('Optimizasyon hatası: {err}', { err: t(String(err)) }), 'error');
     }
   };
 
@@ -776,7 +786,7 @@ export default function App() {
     persistBuilds(nextList);
     if (!compareRightId) setCompareRightId(entry.id);
     setBuildName('');
-    showNotice(`Build kaydedildi: "${finalName}"`, 'success');
+    showNotice(t('Build kaydedildi: "{name}"', { name: finalName }), 'success');
   };
 
   const applyBuildData = (b: Omit<SavedBuild, 'id' | 'name' | 'createdAt'>, label: string) => {
@@ -835,7 +845,7 @@ export default function App() {
         }
       }
     }
-    showNotice(`Build yüklendi: ${label} (${validAllocated.length} puan)`, 'success');
+    showNotice(t('Build yüklendi: {label} ({n} puan)', { label, n: validAllocated.length }), 'success');
   };
 
   const generateShareCode = async () => {
@@ -858,15 +868,15 @@ export default function App() {
     setShareCodeInput(encoded);
     try {
       await navigator.clipboard.writeText(encoded);
-      showNotice('Paylaşım kodu oluşturuldu ve panoya kopyalandı!', 'success');
+      showNotice(t("Paylaşım kodu oluşturuldu ve panoya kopyalandı!"), 'success');
     } catch {
-      showNotice('Paylaşım kodu oluşturuldu (panoya erişim izni yok, kutudan kopyalayın).', 'info');
+      showNotice(t("Paylaşım kodu oluşturuldu (panoya erişim izni yok, kutudan kopyalayın)."), 'info');
     }
   };
 
   const importPob2Code = async (raw: string) => {
     if (!raw) {
-      showNotice('Önce bir kod yapıştırın (POE2TC: veya Path of Building 2 kodu).', 'error');
+      showNotice(t("Önce bir kod yapıştırın (POE2TC: veya Path of Building 2 kodu)."), 'error');
       return;
     }
     try {
@@ -888,7 +898,7 @@ export default function App() {
       const known = r.node_ids.filter((id) => Boolean(nodes[id]));
       const ignored = r.node_ids.length - known.length;
       if (known.length === 0) {
-        showNotice('Koddaki düğümlerin hiçbiri bu ağaç sürümünde bulunamadı.', 'error');
+        showNotice(t("Koddaki düğümlerin hiçbiri bu ağaç sürümünde bulunamadı."), 'error');
         return;
       }
       applyBuildData(
@@ -907,13 +917,16 @@ export default function App() {
       );
       if (ignored > 0) {
         showNotice(
-          `PoB2 build'i yüklendi: ${known.length} düğüm. ${ignored} düğüm atlandı (ascendancy/farklı ağaç sürümü).`,
+          t("PoB2 build'i yüklendi: {n} düğüm. {ignored} düğüm atlandı (ascendancy/farklı ağaç sürümü).", {
+            n: known.length,
+            ignored,
+          }),
           'info'
         );
       }
     } catch (e) {
       showNotice(
-        typeof e === 'string' ? e : 'Kod tanınmadı: POE2TC: veya Path of Building 2 kodu girin.',
+        typeof e === 'string' ? t(e) : t("Kod tanınmadı: POE2TC: veya Path of Building 2 kodu girin."),
         'error'
       );
     }
@@ -964,10 +977,10 @@ export default function App() {
           ascendancyId: typeof p.asc === 'string' ? p.asc : undefined,
           ascendancyNodeIds: Array.isArray(p.ascn) ? p.ascn : undefined,
         },
-        'Paylaşım Kodu'
+        t('Paylaşım Kodu')
       );
     } catch {
-      showNotice('Paylaşım kodu çözümlenemedi (bozuk veya eksik kod).', 'error');
+      showNotice(t("Paylaşım kodu çözümlenemedi (bozuk veya eksik kod)."), 'error');
     }
   };
 
@@ -985,7 +998,7 @@ export default function App() {
     setAllocatedIds((prev) => {
       if (prev.includes(id)) return prev.filter((item) => item !== id);
       if (prev.length >= LIMITS.maxPoints.max) {
-        showNotice(`Maksimum ${LIMITS.maxPoints.max} pasif puan sınırına ulaşıldı.`, 'error');
+        showNotice(t('Maksimum {max} pasif puan sınırına ulaşıldı.', { max: LIMITS.maxPoints.max }), 'error');
         return prev;
       }
       return [...prev, id];
@@ -994,7 +1007,7 @@ export default function App() {
 
   const handleSetAllocatedIds = (nextIds: number[]) => {
     if (nextIds.length > LIMITS.maxPoints.max) {
-      showNotice(`Maksimum ${LIMITS.maxPoints.max} pasif puan sınırına ulaşıldı.`, 'error');
+      showNotice(t('Maksimum {max} pasif puan sınırına ulaşıldı.', { max: LIMITS.maxPoints.max }), 'error');
       setAllocatedIds(nextIds.slice(0, LIMITS.maxPoints.max));
       return;
     }
@@ -1075,9 +1088,31 @@ export default function App() {
         }}
       >
         <strong style={{ color: '#f59e0b', flexShrink: 0 }}>PoE 2 Theorycrafter</strong>
+          <select
+            aria-label={t('Dil')}
+            title={t('Dil')}
+            value={lang}
+            onChange={(e) => {
+              const next = e.target.value === 'tr' ? 'tr' : 'en';
+              setLang(next);
+              setLangState(next);
+            }}
+            style={{
+              background: '#1e2430',
+              color: '#cbd5e1',
+              border: '1px solid #334155',
+              borderRadius: 4,
+              fontSize: 11,
+              padding: '2px 4px',
+              flexShrink: 0,
+            }}
+          >
+            <option value="en">English</option>
+            <option value="tr">Türkçe</option>
+          </select>
 
         <select
-          aria-label="Sınıf Seçimi"
+          aria-label={t("Sınıf Seçimi")}
           value={selectedStartId}
           onChange={(e) => handleClassChange(Number(e.target.value))}
           style={{
@@ -1096,7 +1131,7 @@ export default function App() {
               </option>
             ))
           ) : (
-            <option value={selectedStartId}>Başlangıç Düğümü</option>
+            <option value={selectedStartId}>{t("Başlangıç Düğümü")}</option>
           )}
         </select>
 
@@ -1157,7 +1192,7 @@ export default function App() {
             flexShrink: 0,
           }}
         >
-          <span style={{ color: '#38bdf8', fontWeight: 'bold', fontSize: 12 }}>Dağılım:</span>
+          <span style={{ color: '#38bdf8', fontWeight: 'bold', fontSize: 12 }}>{t("Dağılım:")}</span>
           <span
             style={{
               fontSize: 12,
@@ -1177,7 +1212,7 @@ export default function App() {
           value={maxPoints}
           min={LIMITS.maxPoints.min}
           max={LIMITS.maxPoints.max}
-          title={`Pasif Puan Sınırı: ${LIMITS.maxPoints.min} - ${LIMITS.maxPoints.max}`}
+          title={t('Pasif Puan Sınırı: {min} - {max}', { min: LIMITS.maxPoints.min, max: LIMITS.maxPoints.max })}
           onChange={setMaxPoints}
           style={{
             width: 54,
@@ -1204,15 +1239,16 @@ export default function App() {
             flexShrink: 0,
           }}
         >
-          En İyi Build'i Çiz
+          
+          {t("En İyi Build'i Çiz")}
         </button>
 
         <button
           onClick={() => {
             if (allocatedIds.length <= 1) return;
-            if (window.confirm('Seçili tüm pasif düğümler sıfırlansın mı?')) {
+            if (window.confirm(t("Seçili tüm pasif düğümler sıfırlansın mı?"))) {
               setAllocatedIds(selectedStartId ? [selectedStartId] : []);
-              showNotice('Pasif ağaç sıfırlandı.', 'info');
+              showNotice(t("Pasif ağaç sıfırlandı."), 'info');
             }
           }}
           style={{
@@ -1225,7 +1261,8 @@ export default function App() {
             flexShrink: 0,
           }}
         >
-          Sıfırla
+          
+          {t("Sıfırla")}
         </button>
 
         <button
@@ -1241,7 +1278,7 @@ export default function App() {
             flexShrink: 0,
           }}
         >
-          {isUpdating ? 'Güncelleniyor...' : 'Patch Güncelle (Ctrl+U)'}
+          {isUpdating ? t("Güncelleniyor...") : t("Patch Güncelle (Ctrl+U)")}
         </button>
 
         <span
@@ -1275,11 +1312,12 @@ export default function App() {
               }}
             >
               <strong style={{ fontSize: 18, color: '#f8fafc' }}>
-                Yetenek Ağacı Veritabanı Bulunamadı
+                
+                {t("Yetenek Ağacı Veritabanı Bulunamadı")}
               </strong>
               <p style={{ fontSize: 13, color: '#94a3b8', maxWidth: 420, margin: 0 }}>
-                Path of Building PoE 2 verilerini ve yetenek ağacı görsellerini indirerek
-                planlamaya başlayabilirsiniz.
+                
+                {t("Path of Building PoE 2 verilerini ve yetenek ağacı görsellerini indirerek planlamaya başlayabilirsiniz.")}
               </p>
               <button
                 onClick={() => runUpdate(false)}
@@ -1295,7 +1333,7 @@ export default function App() {
                   cursor: isUpdating ? 'wait' : 'pointer',
                 }}
               >
-                {isUpdating ? 'Veriler İndiriliyor...' : 'Verileri İndir'}
+                {isUpdating ? t("Veriler İndiriliyor...") : t("Verileri İndir")}
               </button>
             </div>
           )}
@@ -1304,7 +1342,7 @@ export default function App() {
           {isAscDrawerOpen && activeAscendancy && (
             <div
               role="dialog"
-              aria-label="Ascendancy Seçimi"
+              aria-label={t("Ascendancy Seçimi")}
               style={{
                 position: 'absolute',
                 top: 12,
@@ -1339,11 +1377,11 @@ export default function App() {
                       borderRadius: 10,
                     }}
                   >
-                    {activeAscNodes.length * 2} / 8 Puan
+                    {activeAscNodes.length * 2}  {t("/ 8 Puan")}
                   </span>
                 </div>
                 <button
-                  aria-label="Kapat"
+                  aria-label={t("Kapat")}
                   onClick={() => setIsAscDrawerOpen(false)}
                   style={{
                     background: 'transparent',
@@ -1416,7 +1454,7 @@ export default function App() {
                           {node.name}
                         </strong>
                         <span style={{ fontSize: 11, color: active ? '#d8b4fe' : '#94a3b8' }}>
-                          {node.desc}
+                          {t(node.desc)}
                         </span>
                       </div>
                       <span
@@ -1430,7 +1468,8 @@ export default function App() {
                           flexShrink: 0,
                         }}
                       >
-                        2 Puan
+                        
+                        {t("2 Puan")}
                       </span>
                     </div>
                   );
@@ -1443,7 +1482,7 @@ export default function App() {
           {isWeightDrawerOpen && (
             <div
               role="dialog"
-              aria-label="Stat Paylaşımı"
+              aria-label={t("Stat Paylaşımı")}
               style={{
                 position: 'absolute',
                 top: 12,
@@ -1464,7 +1503,7 @@ export default function App() {
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <strong style={{ fontSize: 13, color: '#38bdf8' }}>Stat Paylaşımı</strong>
+                  <strong style={{ fontSize: 13, color: '#38bdf8' }}>{t("Stat Paylaşımı")}</strong>
                   <span
                     style={{
                       fontSize: 11,
@@ -1476,7 +1515,8 @@ export default function App() {
                       borderRadius: 10,
                     }}
                   >
-                    Toplam: %{totalWeightPct}
+                    
+                    {t("Toplam: %")}{totalWeightPct}
                   </span>
                 </div>
 
@@ -1494,11 +1534,12 @@ export default function App() {
                         cursor: 'pointer',
                       }}
                     >
-                      Eşit Dağıt
+                      
+                      {t("Eşit Dağıt")}
                     </button>
                   )}
                   <button
-                    aria-label="Kapat"
+                    aria-label={t("Kapat")}
                     onClick={() => setIsWeightDrawerOpen(false)}
                     style={{
                       background: 'transparent',
@@ -1535,7 +1576,7 @@ export default function App() {
                           %{item.weight}
                         </strong>
                         <button
-                          aria-label={`${item.stat} kaldır`}
+                          aria-label={t('{stat} kaldır', { stat: item.stat })}
                           onClick={() => removeStatWeight(item.stat)}
                           style={{
                             background: 'transparent',
@@ -1595,7 +1636,8 @@ export default function App() {
                     cursor: 'pointer',
                   }}
                 >
-                  + Ekle
+                  
+                  {t("+ Ekle")}
                 </button>
               </div>
 
@@ -1612,7 +1654,8 @@ export default function App() {
                   cursor: 'pointer',
                 }}
               >
-                Bu Dağılımla Build'i Çiz (%100)
+                
+                {t("Bu Dağılımla Build'i Çiz (%100)")}
               </button>
             </div>
           )}
@@ -1635,7 +1678,7 @@ export default function App() {
             }}
           >
             <input
-              aria-label="Ağaçta düğüm ara"
+              aria-label={t("Ağaçta düğüm ara")}
               value={nodeSearchQuery}
               onChange={(e) => setNodeSearchQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -1650,7 +1693,7 @@ export default function App() {
                   }
                 }
               }}
-              placeholder="Ağaçta düğüm / Keystone ara (Enter ile odaklan)..."
+              placeholder={t("Ağaçta düğüm / Keystone ara (Enter ile odaklan)...")}
               style={{
                 background: 'transparent',
                 border: 'none',
@@ -1665,7 +1708,7 @@ export default function App() {
                 <span style={{ fontSize: 11, color: '#00f5d4', fontWeight: 'bold' }}>
                   {matchedNodeIds.length > 0
                     ? `${focusIndex + 1}/${matchedNodeIds.length}`
-                    : '0 sonuç'}
+                    : t('0 sonuç')}
                 </span>
                 {matchedNodeIds.length > 0 && (
                   <button
@@ -1681,11 +1724,12 @@ export default function App() {
                       cursor: 'pointer',
                     }}
                   >
-                    Odaklan
+                    
+                    {t("Odaklan")}
                   </button>
                 )}
                 <button
-                  aria-label="Aramayı temizle"
+                  aria-label={t("Aramayı temizle")}
                   onClick={() => setNodeSearchQuery('')}
                   style={{
                     background: 'transparent',
@@ -1714,7 +1758,7 @@ export default function App() {
             onToggleNode={handleToggleNode}
             onSetAllocatedIds={handleSetAllocatedIds}
             onBudgetExceeded={(_, max) =>
-              showNotice(`Maksimum ${max} pasif puan sınırına ulaşıldı.`, 'error')
+              showNotice(t('Maksimum {max} pasif puan sınırına ulaşıldı.', { max }), 'error')
             }
           />
 
@@ -1778,7 +1822,8 @@ export default function App() {
                 cursor: 'pointer',
               }}
             >
-              Build & EHP ({allocatedIds.length})
+              
+              {t("Build & EHP (")}{allocatedIds.length})
             </button>
             <button
               onClick={() => setRightTab('gems')}
@@ -1810,7 +1855,8 @@ export default function App() {
                 cursor: 'pointer',
               }}
             >
-              Kayıt & Kıyas ({savedBuilds.length})
+              
+              {t("Kayıt & Kıyas (")}{savedBuilds.length})
             </button>
           </div>
 
@@ -1841,14 +1887,14 @@ export default function App() {
                   >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <strong style={{ fontSize: 12, color: '#c084fc' }}>
-                        Ascendancy: {activeAscendancy.name} ({activeAscNodes.length * 2}/8 Puan)
+                        Ascendancy: {activeAscendancy.name} ({activeAscNodes.length * 2}{t("/8 Puan)")}
                       </strong>
-                      <span style={{ fontSize: 11, color: '#a855f7' }}>Düzenle</span>
+                      <span style={{ fontSize: 11, color: '#a855f7' }}>{t("Düzenle")}</span>
                     </div>
                     <div style={{ fontSize: 11, color: '#d8b4fe' }}>
                       {activeAscNodes.length > 0
                         ? activeAscNodes.map((n) => n.name).join(' • ')
-                        : 'Ascendancy düğümü seçilmedi'}
+                        : t("Ascendancy düğümü seçilmedi")}
                     </div>
                   </div>
                 )}
@@ -1866,7 +1912,8 @@ export default function App() {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: 12, fontWeight: 'bold', color: '#94a3b8' }}>
-                      Savunma (Effective HP)
+                      
+                      {t("Savunma (Effective HP)")}
                     </span>
                     <strong style={{ fontSize: 16, color: '#22c55e' }}>
                       {currentEvaluation.effective_hp.toLocaleString()} EHP
@@ -1902,11 +1949,13 @@ export default function App() {
                     }}
                   >
                     <span style={{ color: '#cbd5e1' }}>
-                      Crit Şansı:{' '}
+                      
+                      {t("Crit Şansı:")}{' '}
                       <strong style={{ color: '#facc15' }}>%{currentEvaluation.effective_crit}</strong>
                     </span>
                     <span style={{ color: '#cbd5e1' }}>
-                      Crit Hasarı:{' '}
+                      
+                      {t("Crit Hasarı:")}{' '}
                       <strong style={{ color: '#facc15' }}>
                         +%{currentEvaluation.total_crit_mult_pct}
                       </strong>
@@ -1917,7 +1966,8 @@ export default function App() {
                 {Object.keys(currentEvaluation.parsed.totals).length === 0 &&
                 currentEvaluation.parsed.raw_lines.length === 0 ? (
                   <div style={{ fontSize: 13, color: '#64748b' }}>
-                    Sınıf seçip <b>En İyi Build'i Çiz</b> butonuna basın veya düğümlere tıklayarak puan verin.
+                    
+                    {t("Sınıf seçip")} <b>{t("En İyi Build'i Çiz")}</b>  {t("butonuna basın veya düğümlere tıklayarak puan verin.")}
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -1964,12 +2014,13 @@ export default function App() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                 <div>
                   <div style={{ fontSize: 12, color: '#94a3b8', marginBottom: 4 }}>
-                    Aktif Skill Gem ({activeGems.length} yetenek)
+                    
+                    {t("Aktif Skill Gem (")}{activeGems.length}  {t("yetenek)")}
                   </div>
                   <input
                     value={gemSearch}
                     onChange={(e) => setGemSearch(e.target.value)}
-                    placeholder="Örn: Tempest Flurry, Spark, Lightning Arrow..."
+                    placeholder={t("Örn: Tempest Flurry, Spark, Lightning Arrow...")}
                     style={{
                       width: '100%',
                       boxSizing: 'border-box',
@@ -2033,13 +2084,15 @@ export default function App() {
                   }}
                 >
                   <div style={{ fontSize: 12, fontWeight: 'bold', color: '#f59e0b' }}>
-                    Silah & Ekipman Çarpanları
+                    
+                    {t("Silah & Ekipman Çarpanları")}
                   </div>
 
                   <div style={{ display: 'flex', gap: 8 }}>
                     <div style={{ flex: 1 }}>
                       <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 2 }}>
-                        Silah Baz DPS (Max {LIMITS.weaponBaseDps.max.toLocaleString()})
+                        
+                        {t("Silah Baz DPS (Max")} {LIMITS.weaponBaseDps.max.toLocaleString()})
                       </label>
                       <NumberField
                         min={LIMITS.weaponBaseDps.min}
@@ -2103,11 +2156,12 @@ export default function App() {
 
                   <div style={{ fontSize: 11, color: '#94a3b8', display: 'flex', justifyContent: 'space-between' }}>
                     <span>
-                      Etkin Seviye:{' '}
+                      
+                      {t("Etkin Seviye:")}{' '}
                       <strong style={{ color: '#fff' }}>Lv.{currentEvaluation.effective_level}</strong>
                     </span>
                     <span style={{ color: '#38bdf8' }}>
-                      +{currentEvaluation.bonus_level_gain_pct}% Taban Hasar
+                      +{currentEvaluation.bonus_level_gain_pct}{t("% Taban Hasar")}
                     </span>
                   </div>
                 </div>
@@ -2129,7 +2183,8 @@ export default function App() {
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: 12, fontWeight: 'bold', color: '#c084fc' }}>
-                      Spirit Bütçesi & Aura / Herald
+                      
+                      {t("Spirit Bütçesi & Aura / Herald")}
                     </span>
                     <strong
                       style={{
@@ -2163,7 +2218,8 @@ export default function App() {
 
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, fontSize: 11 }}>
                     <span style={{ color: '#94a3b8' }}>
-                      100 Görev + {currentEvaluation.tree_and_asc_spirit} Ağaç/Asc + Ekipman:
+                      
+                      {t("100 Görev +")} {currentEvaluation.tree_and_asc_spirit}  {t("Ağaç/Asc + Ekipman:")}
                     </span>
                     <NumberField
                       min={LIMITS.gearSpirit.min}
@@ -2184,7 +2240,8 @@ export default function App() {
 
                   {currentEvaluation.remaining_spirit < 0 && (
                     <div style={{ fontSize: 11, color: '#f87171', fontWeight: 'bold' }}>
-                      ⚠ Spirit kapasitesi {Math.abs(currentEvaluation.remaining_spirit)} puan aşıldı!
+                      
+                      {t("⚠ Spirit kapasitesi")} {Math.abs(currentEvaluation.remaining_spirit)}  {t("puan aşıldı!")}
                     </div>
                   )}
 
@@ -2230,7 +2287,7 @@ export default function App() {
                               {buff.name}
                             </span>
                             <span style={{ fontSize: 10, color: active ? '#d8b4fe' : '#64748b' }}>
-                              {buff.effectLabel}
+                              {t(buff.effectLabel)}
                             </span>
                           </div>
                           <span
@@ -2264,7 +2321,7 @@ export default function App() {
                   }}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <span style={{ fontSize: 12, color: '#cbd5e1' }}>Toplam DPS:</span>
+                    <span style={{ fontSize: 12, color: '#cbd5e1' }}>{t("Toplam DPS:")}</span>
                     <strong style={{ color: '#f59e0b', fontSize: 18 }}>
                       {currentEvaluation.est_dps.toLocaleString()} DPS
                     </strong>
@@ -2284,12 +2341,14 @@ export default function App() {
                 </div>
 
                 <div style={{ fontSize: 12, fontWeight: 'bold', color: '#f8fafc' }}>
-                  Önerilen Support Gem'ler (Uyum & DPS):
+                  
+                  {t("Önerilen Support Gem'ler (Uyum & DPS):")}
                 </div>
 
                 {recommendedSupports.length === 0 ? (
                   <div style={{ fontSize: 12, color: '#64748b' }}>
-                    Bu yetenek için uyumlu Support Gem bulunamadı.
+                    
+                    {t("Bu yetenek için uyumlu Support Gem bulunamadı.")}
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -2326,7 +2385,7 @@ export default function App() {
                                 borderRadius: 4,
                               }}
                             >
-                              %{sup.match_score_pct} Öneri
+                              %{sup.match_score_pct}  {t("Öneri")}
                             </span>
                             <span
                               style={{
@@ -2362,7 +2421,8 @@ export default function App() {
                     }}
                   >
                     <div style={{ fontSize: 12, fontWeight: 'bold', color: '#f59e0b' }}>
-                      İki Build Kıyaslama (Compare / Diff)
+                      
+                      {t("İki Build Kıyaslama (Compare / Diff)")}
                     </div>
 
                     <div style={{ display: 'flex', gap: 6 }}>
@@ -2379,7 +2439,7 @@ export default function App() {
                           fontSize: 11,
                         }}
                       >
-                        <option value="CURRENT">Aktif Build ({allocatedIds.length}p)</option>
+                        <option value="CURRENT">{t("Aktif Build (")}{allocatedIds.length}p)</option>
                         {savedBuilds.map((b) => (
                           <option key={b.id} value={b.id}>
                             {b.name}
@@ -2405,7 +2465,7 @@ export default function App() {
                             {b.name}
                           </option>
                         ))}
-                        <option value="CURRENT">Aktif Build ({allocatedIds.length}p)</option>
+                        <option value="CURRENT">{t("Aktif Build (")}{allocatedIds.length}p)</option>
                       </select>
                     </div>
 
@@ -2422,12 +2482,12 @@ export default function App() {
                             borderRadius: 4,
                           }}
                         >
-                          <span style={{ color: '#94a3b8', fontWeight: 'bold' }}>Metrik</span>
+                          <span style={{ color: '#94a3b8', fontWeight: 'bold' }}>{t("Metrik")}</span>
                           <span style={{ color: '#38bdf8', fontWeight: 'bold' }}>Build A</span>
                           <span style={{ color: '#c084fc', fontWeight: 'bold' }}>Build B</span>
-                          <span style={{ color: '#f59e0b', fontWeight: 'bold' }}>Fark (A-B)</span>
+                          <span style={{ color: '#f59e0b', fontWeight: 'bold' }}>{t("Fark (A-B)")}</span>
 
-                          <span style={{ color: '#cbd5e1' }}>Tahmini DPS</span>
+                          <span style={{ color: '#cbd5e1' }}>{t("Tahmini DPS")}</span>
                           <span style={{ color: '#fff' }}>{comparisonResults.left.est_dps.toLocaleString()}</span>
                           <span style={{ color: '#fff' }}>{comparisonResults.right.est_dps.toLocaleString()}</span>
                           {renderDiffBadge(comparisonResults.left.est_dps - comparisonResults.right.est_dps)}
@@ -2447,7 +2507,7 @@ export default function App() {
                           <span style={{ color: '#fff' }}>{comparisonResults.right.total_es}</span>
                           {renderDiffBadge(comparisonResults.left.total_es - comparisonResults.right.total_es)}
 
-                          <span style={{ color: '#cbd5e1' }}>Crit Şansı</span>
+                          <span style={{ color: '#cbd5e1' }}>{t("Crit Şansı")}</span>
                           <span style={{ color: '#fff' }}>%{comparisonResults.left.effective_crit}</span>
                           <span style={{ color: '#fff' }}>%{comparisonResults.right.effective_crit}</span>
                           {renderDiffBadge(
@@ -2455,7 +2515,7 @@ export default function App() {
                             '%'
                           )}
 
-                          <span style={{ color: '#cbd5e1' }}>Spirit Kap.</span>
+                          <span style={{ color: '#cbd5e1' }}>{t("Spirit Kap.")}</span>
                           <span style={{ color: '#fff' }}>{comparisonResults.left.max_spirit}</span>
                           <span style={{ color: '#fff' }}>{comparisonResults.right.max_spirit}</span>
                           {renderDiffBadge(comparisonResults.left.max_spirit - comparisonResults.right.max_spirit)}
@@ -2470,9 +2530,9 @@ export default function App() {
                             paddingTop: 2,
                           }}
                         >
-                          <span>Ortak Düğüm: <strong style={{ color: '#22c55e' }}>{comparisonResults.sharedNodes}</strong></span>
-                          <span>Sadece A: <strong style={{ color: '#38bdf8' }}>{comparisonResults.onlyLeftNodes}</strong></span>
-                          <span>Sadece B: <strong style={{ color: '#c084fc' }}>{comparisonResults.onlyRightNodes}</strong></span>
+                          <span>{t("Ortak Düğüm:")} <strong style={{ color: '#22c55e' }}>{comparisonResults.sharedNodes}</strong></span>
+                          <span>{t("Sadece A:")} <strong style={{ color: '#38bdf8' }}>{comparisonResults.onlyLeftNodes}</strong></span>
+                          <span>{t("Sadece B:")} <strong style={{ color: '#c084fc' }}>{comparisonResults.onlyRightNodes}</strong></span>
                         </div>
                       </>
                     )}
@@ -2491,13 +2551,14 @@ export default function App() {
                   }}
                 >
                   <div style={{ fontSize: 12, fontWeight: 'bold', color: '#22c55e' }}>
-                    Mevcut Build'i Kaydet
+                    
+                    {t("Mevcut Build'i Kaydet")}
                   </div>
                   <input
                     value={buildName}
                     onChange={(e) => setBuildName(e.target.value)}
                     maxLength={60}
-                    placeholder="Build adı (ör. Invoker Crit vs ES)..."
+                    placeholder={t("Build adı (ör. Invoker Crit vs ES)...")}
                     style={{
                       width: '100%',
                       boxSizing: 'border-box',
@@ -2520,7 +2581,8 @@ export default function App() {
                       cursor: 'pointer',
                     }}
                   >
-                    Kaydet ({allocatedIds.length} Puan)
+                    
+                    {t("Kaydet (")}{allocatedIds.length}  {t("Puan)")}
                   </button>
                 </div>
 
@@ -2536,13 +2598,14 @@ export default function App() {
                   }}
                 >
                   <div style={{ fontSize: 12, fontWeight: 'bold', color: '#38bdf8' }}>
-                    Build Paylaşım Kodu (Export / Import)
+                    
+                    {t("Build Paylaşım Kodu (Export / Import)")}
                   </div>
                   <textarea
                     rows={3}
                     value={shareCodeInput}
                     onChange={(e) => setShareCodeInput(e.target.value)}
-                    placeholder="Kodu dışa aktarmak için aşağıya tıklayın veya POE2TC:... / Path of Building 2 kodunu buraya yapıştırın"
+                    placeholder={t("Kodu dışa aktarmak için aşağıya tıklayın veya POE2TC:... / Path of Building 2 kodunu buraya yapıştırın")}
                     style={{
                       width: '100%',
                       boxSizing: 'border-box',
@@ -2570,7 +2633,8 @@ export default function App() {
                         fontSize: 12,
                       }}
                     >
-                      Kodu Oluştur & Kopyala
+                      
+                      {t("Kodu Oluştur & Kopyala")}
                     </button>
                     <button
                       onClick={importShareCode}
@@ -2586,18 +2650,21 @@ export default function App() {
                         fontSize: 12,
                       }}
                     >
-                      Kodu Yükle
+                      
+                      {t("Kodu Yükle")}
                     </button>
                   </div>
                 </div>
 
                 <div style={{ fontSize: 12, fontWeight: 'bold', color: '#f8fafc' }}>
-                  Kayıtlı Build'ler ({savedBuilds.length})
+                  
+                  {t("Kayıtlı Build'ler (")}{savedBuilds.length})
                 </div>
 
                 {savedBuilds.length === 0 ? (
                   <div style={{ fontSize: 12, color: '#64748b' }}>
-                    Henüz kaydedilmiş bir build yok. Build kaydettiğinde yukarıda otomatik kıyaslama tablosu açılır.
+                    
+                    {t("Henüz kaydedilmiş bir build yok. Build kaydettiğinde yukarıda otomatik kıyaslama tablosu açılır.")}
                   </div>
                 ) : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -2619,7 +2686,8 @@ export default function App() {
                           <span style={{ fontSize: 11, color: '#64748b' }}>{b.createdAt}</span>
                         </div>
                         <div style={{ fontSize: 11, color: '#94a3b8' }}>
-                          Hedef: {b.targetStat} • {b.allocatedIds.length} Puan
+                          
+                          {t("Hedef:")} {b.targetStat} • {b.allocatedIds.length}  {t("Puan")}
                         </div>
                         <div style={{ display: 'flex', gap: 6 }}>
                           <button
@@ -2636,13 +2704,14 @@ export default function App() {
                               fontSize: 11,
                             }}
                           >
-                            Yükle
+                            
+                            {t("Yükle")}
                           </button>
                           <button
                             onClick={() => {
-                              if (window.confirm(`"${b.name}" build'i silinsin mi?`)) {
+                              if (window.confirm(t('"{name}" build\'i silinsin mi?', { name: b.name }))) {
                                 persistBuilds(savedBuilds.filter((item) => item.id !== b.id));
-                                showNotice(`"${b.name}" silindi.`, 'info');
+                                showNotice(t('"{name}" silindi.', { name: b.name }), 'info');
                               }
                             }}
                             style={{
@@ -2655,7 +2724,8 @@ export default function App() {
                               fontSize: 11,
                             }}
                           >
-                            Sil
+                            
+                            {t("Sil")}
                           </button>
                         </div>
                       </div>

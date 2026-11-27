@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState, useMemo, useCallback } from 'react';
+import { t } from '../i18n';
 
 export interface SpriteRect {
   filename: string;
@@ -558,7 +559,7 @@ export const SkillTreeCanvas: React.FC<SkillTreeCanvasProps> = ({
           }}
         >
           <div style={{ fontWeight: 'bold', fontSize: 13, color: '#f8fafc', marginBottom: 4 }}>
-            {hoveredNode.name || `Düğüm #${hoveredNode.id}`}
+            {hoveredNode.name || t('Düğüm #{id}', { id: hoveredNode.id })}
           </div>
           {hoveredNode.stats.map((st, idx) => (
             <div key={idx} style={{ fontSize: 12, color: '#93c5fd', lineHeight: 1.4 }}>
@@ -568,16 +569,17 @@ export const SkillTreeCanvas: React.FC<SkillTreeCanvasProps> = ({
           <div style={{ marginTop: 7, fontSize: 11, fontWeight: 'bold' }}>
             {hoverPreview.removeList.length > 0 ? (
               <span style={{ color: '#f87171' }}>
-                Kaldırılacak: {hoverPreview.removeList.length} puan
+                
+                {t("Kaldırılacak:")} {hoverPreview.removeList.length}  {t("puan")}
               </span>
             ) : hoverPreview.overBudget ? (
               <span style={{ color: '#fb923c' }}>
-                +{hoverPreview.addPath.length} puan (Bütçe sınırı {maxPoints} aşılıyor)
+                +{hoverPreview.addPath.length}  {t("puan (Bütçe sınırı")} {maxPoints}  {t("aşılıyor)")}
               </span>
             ) : hoverPreview.addPath.length > 0 ? (
-              <span style={{ color: '#38bdf8' }}>+{hoverPreview.addPath.length} puan bağla</span>
+              <span style={{ color: '#38bdf8' }}>+{hoverPreview.addPath.length}  {t("puan bağla")}</span>
             ) : (
-              <span style={{ color: '#64748b' }}>Ana ağaca doğrudan bağlı değil</span>
+              <span style={{ color: '#64748b' }}>{t("Ana ağaca doğrudan bağlı değil")}</span>
             )}
           </div>
         </div>
