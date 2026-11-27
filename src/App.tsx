@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { Lang, getLang, setLang, t, tReason } from './i18n';
+import { WEIGHT_PRESETS } from './data/presets';
+import { explainAllocation } from './explain';
 import { PassiveNode, SkillTreeCanvas } from './components/SkillTreeCanvas';
 import {
   ASCENDANCIES,
@@ -213,6 +215,7 @@ export default function App() {
     { stat: 'Critical', weight: 25 },
     { stat: 'Energy Shield', weight: 15 },
   ]);
+  const [lastOptimizedWeights, setLastOptimizedWeights] = useState<Record<string, number> | null>(null);
   const [isWeightDrawerOpen, setIsWeightDrawerOpen] = useState<boolean>(false);
   const [newStatName, setNewStatName] = useState<string>('Maximum Life');
 
@@ -582,6 +585,20 @@ export default function App() {
     [statWeights]
   );
 
+  const explanation = useMemo(
+    () =>
+      lastOptimizedWeights && allocatedIds.length > 1
+        ? explainAllocation(nodes, allocatedIds, lastOptimizedWeights)
+        : null,
+    [nodes, allocatedIds, lastOptimizedWeights]
+  );
+
+  const applyPreset = (presetId: string) => {
+    const preset = WEIGHT_PRESETS.find((p) => p.id === presetId);
+    if (!preset) return;
+    setStatWeights(normalizeToHundred(preset.weights.map((w) => ({ ...w }))));
+  };
+
   const activeWeightsSummary = useMemo(() => {
     const active = statWeights.filter((w) => w.weight > 0);
     if (active.length === 0) return t("Stat Seçilmedi");
@@ -753,6 +770,7 @@ export default function App() {
         weights,
       });
       setAllocatedIds(resultIds);
+      setLastOptimizedWeights(weights);
       showNotice(
         t('Optimizasyon tamamlandı ({name}): {n} puan dağıtıldı.', {
           name: activeAscendancy?.name || selectedBaseClassName,
@@ -1570,6 +1588,27 @@ export default function App() {
                 </div>
               </div>
 
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
+                <span style={{ fontSize: 11, color: '#64748b' }}>{t('Hazır şablonlar:')}</span>
+                {WEIGHT_PRESETS.map((p) => (
+                  <button
+                    key={p.id}
+                    onClick={() => applyPreset(p.id)}
+                    style={{
+                      background: '#1e293b',
+                      border: '1px solid #334155',
+                      color: '#cbd5e1',
+                      fontSize: 11,
+                      padding: '3px 8px',
+                      borderRadius: 10,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    {t(p.label)}
+                  </button>
+                ))}
+              </div>
+
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {statWeights.map((item) => (
                   <div
@@ -1912,6 +1951,59 @@ export default function App() {
                         ? activeAscNodes.map((n) => n.name).join(' • ')
                         : t("Ascendancy düğümü seçilmedi")}
                     </div>
+                  </div>
+                )}
+
+                {explanation && (
+                  <div
+                    style={{
+                      background: '#131824',
+                      border: '1px solid #1e293b',
+                      borderRadius: 6,
+                      padding: 10,
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 6,
+                      fontSize: 12,
+                    }}
+                  >
+                    <strong style={{ color: '#f59e0b' }}>{t('Neden bu düğümler?')}</strong>
+                    <div style={{ color: '#94a3b8' }}>
+                      {t('{n} düğümün {m} tanesi hedef statlarına katkı veriyor; {k} tanesi yol / bağlantı düğümü.', {
+                        n: explanation.totalNodes,
+                        m: explanation.totalNodes - explanation.travelNodes,
+                        k: explanation.travelNodes,
+                      })}
+                    </div>
+                    {explanation.perStat.map((ps) => (
+                      <div key={ps.stat} style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <span style={{ color: '#cbd5e1', textTransform: 'capitalize' }}>{ps.stat}</span>
+                        <strong style={{ color: ps.nodes > 0 ? '#22c55e' : '#ef4444' }}>
+                          {t('{n} düğüm', { n: ps.nodes })}
+                        </strong>
+                      </div>
+                    ))}
+                    {explanation.perStat.some((ps) => ps.nodes === 0) && (
+                      <div style={{ color: '#fca5a5' }}>
+                        {t('Bazı statlar için hiç düğüm bulunamadı; ağırlığı farklı bir stata kaydırmayı deneyin.')}
+                      </div>
+                    )}
+                    {explanation.highlights.length > 0 && (
+                      <div style={{ borderTop: '1px solid #1e293b', paddingTop: 6 }}>
+                        <div style={{ color: '#94a3b8', marginBottom: 4 }}>
+                          {t('Öne çıkan Keystone / Notable düğümler:')}
+                        </div>
+                        {explanation.highlights.slice(0, 8).map((h, i) => (
+                          <div key={`${h.name}-${i}`} style={{ marginBottom: 3 }}>
+                            <span style={{ color: h.kind === 'keystone' ? '#f59e0b' : '#38bdf8', fontWeight: 'bold' }}>
+                              {h.kind === 'keystone' ? '◆ ' : '● '}
+                              {h.name}
+                            </span>
+                            <div style={{ color: '#64748b', fontSize: 11 }}>{h.lines.join(' • ')}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 
