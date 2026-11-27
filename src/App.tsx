@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { Lang, getLang, setLang, t } from './i18n';
+import { Lang, getLang, setLang, t, tReason } from './i18n';
 import { PassiveNode, SkillTreeCanvas } from './components/SkillTreeCanvas';
 import {
   ASCENDANCIES,
@@ -483,20 +483,31 @@ export default function App() {
       return;
     }
 
-    const leftReq = buildRustRequest(
-      leftBuild,
-      leftBuild.id === 'CURRENT' ? recommendedSupports : []
-    );
-    const rightReq = buildRustRequest(
-      rightBuild,
-      rightBuild.id === 'CURRENT' ? recommendedSupports : []
-    );
+    let cancelled = false;
+    // Kayıtlı build'ler için de aktif build gibi support önerileri hesaplanır;
+    // aksi halde aynı build kıyaslamada "support'suz" görünüp yanlış fark üretir.
+    const supportsFor = async (b: typeof leftBuild): Promise<SupportRecommendation[]> => {
+      if (b.id === 'CURRENT') return recommendedSupports;
+      if (!b.selectedSkillId) return [];
+      try {
+        return await invoke<SupportRecommendation[]>('recommend_support_gems', {
+          activeSkillId: b.selectedSkillId,
+          allocatedIds: b.allocatedIds || [],
+        });
+      } catch {
+        return [];
+      }
+    };
 
-    invoke<BuildEvaluationResult[]>('evaluate_builds_batch', {
-      requests: [leftReq, rightReq],
-    })
-      .then(([leftRes, rightRes]) => {
-        if (!leftRes || !rightRes) return;
+    void (async () => {
+      const [leftSup, rightSup] = await Promise.all([supportsFor(leftBuild), supportsFor(rightBuild)]);
+      const leftReq = buildRustRequest(leftBuild, leftSup);
+      const rightReq = buildRustRequest(rightBuild, rightSup);
+      try {
+        const [leftRes, rightRes] = await invoke<BuildEvaluationResult[]>('evaluate_builds_batch', {
+          requests: [leftReq, rightReq],
+        });
+        if (cancelled || !leftRes || !rightRes) return;
         const setLeft = new Set(leftBuild.allocatedIds || []);
         const setRight = new Set(rightBuild.allocatedIds || []);
         let sharedNodes = 0;
@@ -512,8 +523,13 @@ export default function App() {
           onlyLeftNodes: setLeft.size - sharedNodes,
           onlyRightNodes: setRight.size - sharedNodes,
         });
-      })
-      .catch(() => {});
+      } catch {
+        /* değerlendirme başarısız: eski sonuç kalsın */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [
     nodes,
     savedBuilds,
@@ -2398,7 +2414,7 @@ export default function App() {
                             </span>
                           </div>
                         </div>
-                        <div style={{ fontSize: 11, color: '#94a3b8' }}>{sup.reason}</div>
+                        <div style={{ fontSize: 11, color: '#94a3b8' }}>{tReason(sup.reason)}</div>
                       </div>
                     ))}
                   </div>

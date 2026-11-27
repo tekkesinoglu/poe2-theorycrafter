@@ -184,4 +184,64 @@ export const EN: Record<string, string> = {
   "Kod boş": "Code is empty",
   "Kod çok uzun": "Code is too long",
   "Kod açılamadı (bozuk ya da çok büyük)": "Could not unpack the code (corrupted or too large)",
+  "Spell More Damage çarpanı sağlar": "Adds a More Damage multiplier for spells",
+  "Alan yeteneklerine yüksek More Area Damage verir": "Gives area skills a high More Area Damage bonus",
+  "Saf Fiziksel More Damage (Element hasarını kapatır)": "Pure Physical More Damage (disables Elemental damage)",
+  "Düşman Lightning direncini deler": "Penetrates enemy Lightning resistance",
+  "Düşman Fire direncini deler": "Penetrates enemy Fire resistance",
+  "Düşman Cold direncini deler": "Penetrates enemy Cold resistance",
+  "Saf Elemental More Damage (Ailment uygulamaz)": "Pure Elemental More Damage (cannot apply Ailments)",
+  "Sadece Melee vuruşların fiziksel hasarını artırır": "Increases physical damage of Melee hits only",
+  "Critical Damage Bonus çarpanını yükseltir": "Raises the Critical Damage Bonus multiplier",
+  "Ignite olmuş düşmanlara ekstra Fire hasarı ekler": "Adds extra Fire damage against Ignited enemies",
+  "Silah Elemental hasarını çarpar": "Multiplies weapon Elemental damage",
+  "Minion seviyesi ve toplam hasarını artırır": "Increases Minion level and total damage",
+  "Critical Hit şansını katlar": "Multiplies Critical Hit chance",
+  "Ekstra mermi (Projectile) ile çoklu vuruş sağlar": "Fires extra Projectiles for multiple hits",
+  "Minion saldırı hızı ve agresifliğini artırır": "Increases Minion attack speed and aggression",
+  "More Cast Speed ile saniyelik hasarı artırır": "Increases damage per second with More Cast Speed",
+  "More Attack Speed ile DPS çarpanı sağlar": "Adds a DPS multiplier with More Attack Speed",
+  "Shock uygulama şansını ve süresini artırır": "Increases Shock chance and duration",
+  "Alan (AoE) yarıçapını ve etki menzilini artırır": "Increases Area of Effect radius and range",
+  "Mermilerin çarpınca ikiye ayrılmasını sağlar": "Projectiles split in two on impact",
+  "Chaos vuruşlarında Withered yükü biriktirir": "Chaos hits build up Withered stacks",
+  "Chaos ve Poison etkilerinin süresini ve hasarını artırır": "Increases duration and damage of Chaos and Poison effects",
+  "Yeteneğin aktif kalma süresini uzatır": "Extends how long the skill stays active",
+  "Süre bazlı etkilerin daha hızlı tetiklenmesini sağlar": "Makes duration-based effects tick faster",
+  "Curse etkisinin düşman üzerindeki gücünü artırır": "Increases the strength of Curses on enemies",
+  "Curse alanını ve uygulama hızını iyileştirir": "Improves Curse area and application speed",
+  "Curse ve Mark aktivasyon gecikmesini azaltır": "Reduces Curse and Mark activation delay",
+  "Maksimum aktif Totem sınırını +1 artırır": "Increases the maximum active Totem limit by 1",
+  "Totem yerleştirme hızını ciddi oranda artırır": "Greatly increases Totem placement speed",
+  "Düşman öldürünce anında Life yenilemesi sağlar": "Instantly recovers Life when you kill an enemy",
+  "Saniyelik sabit Life yenilenmesi kazandırır": "Grants flat Life regeneration per second",
+  "Mana yenilenme hızını artırır": "Increases Mana regeneration rate",
+  "Accuracy ve Critical Hit şansını yükseltir": "Increases Accuracy and Critical Hit chance",
+  "Life Flask iyileştirme miktarını artırır": "Increases Life Flask recovery amount",
+  "Energy Shield ve Mana kapasitesiyle sinerji sağlar": "Synergizes with Energy Shield and Mana capacity",
+  "Meta yeteneklerin Energy kazanım hızını artırır": "Increases Energy gain rate of Meta skills",
+  "Tetikleme sonrası harcanan Energy'nin bir kısmını korur": "Retains part of the Energy spent after triggering",
+  "Maksimum Energy kapasitesini ve tetikleme sıklığını artırır": "Increases maximum Energy and trigger frequency",
+  "Warcry güçlendirmesini ve hasar bonusunu artırır": "Increases Warcry empowerment and damage bonus",
+  "Warcry alanındaki düşmanlara fiziksel/kaos zayıflatması uygular": "Applies physical/chaos weakening to enemies in the Warcry area",
+  "Cooldown recovery hızını artırır ve ekstra kullanım hakkı verir": "Increases Cooldown recovery rate and grants an extra use",
+  "Hareket veya odaklanma sonrası saldırı/büyü hızı verir": "Grants attack/cast speed after moving or channeling",
+  "Yetenek kullanımı sırasında Stun direncini artırır": "Increases Stun resistance while using the skill",
+  "Yeteneğin Mana maliyetini düşürür": "Reduces the skill's Mana cost",
+  "Bekleme süresi (Cooldown) toparlanma hızını artırır": "Increases Cooldown recovery rate",
+  "Yeteneğin kaynak (Mana/Maliyet) tüketimini azaltır": "Reduces the skill's resource (Mana/cost) consumption",
+  "Yeteneğin bekleme süresi ve kullanım akıcılığını iyileştirir": "Improves the skill's cooldown and usage flow",
 };
+
+/** Rust tarafı öneri açıklamasının sonuna Türkçe sinerji notu ekleyebilir; onu da çevirir. */
+export function tReason(reason: string): string {
+  if (current !== 'en') return reason;
+  const m = reason.match(/^(.*?) \((Ağaçtaki .*)\)$/);
+  if (!m) return t(reason);
+  const head = t(m[1]);
+  if (m[2] === 'Ağaçtaki Critical build ile yüksek sinerji') {
+    return `${head} (high synergy with the Critical build in your tree)`;
+  }
+  const tag = m[2].match(/^Ağaçtaki (.+) düğümleriyle sinerjili$/);
+  return tag ? `${head} (synergizes with ${tag[1]} nodes in your tree)` : head;
+}
